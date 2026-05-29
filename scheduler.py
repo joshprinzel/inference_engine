@@ -6,6 +6,7 @@ from metrics_store import MetricsStore
 from model_runner import ModelRunner
 from request_state import RequestState
 from request_queue import RequestQueue
+from batch_metrics import BatchMetrics
 
 class Scheduler:
     def __init__(
@@ -29,6 +30,9 @@ class Scheduler:
         self.active: list[RequestState] = []
         self.finished: list[RequestState] = []
         self.batch_state: dict | None = None
+
+        self.current_batch_metrics: BatchMetrics | None = None
+        self.completed_batch_metrics: list[dict] = []
 
         self._lock = Lock()
         self._thread: Thread | None = None
@@ -67,7 +71,10 @@ class Scheduler:
                 "batch_size_history_tail": self.batch_size_history[-20:],
                 "queue_length_history_tail": self.queue_length_history[-20:],
                 "finished_count_history_tail": self.finished_count_history[-20:],
-                "completed_batch_sizes_tail": self.completed_batch_sizes[-20:]
+                "completed_batch_sizes_tail": self.completed_batch_sizes[-20:],
+                "completed_batch_metrics_count": len(self.completed_batch_metrics),
+                "has_current_batch_metrics": self.current_batch_metrics is not None,
+                "completed_batch_metrics_tail": self.completed_batch_metrics[-20:],
             }
 
     def has_batch_capacity(self) -> bool:
@@ -104,10 +111,18 @@ class Scheduler:
             batch.append(request_state)
         
         try:
+            batch_metrics = BatchMetrics(batch_size=len(batch))
+            batch_metrics.mark_prefill_start()
             self.batch_state = self.runner.init_batch_request_states(batch)
+            batch_metrics.mark_prefill_end()
+            self.current_batch_metrics = batch_metrics
             self.active = batch
         
         except Exception as error:
+            if self.current_batch_metrics is not None:
+                self.current_batch_metrics.mark_failed()
+                self.completed_batch_metrics.append(self.current_batch_metrics.to_dict())
+                self.current_batch_metrics = None
             for request_state in batch:
                 request_state.mark_failed(error)
                 self.finished.append(request_state)
@@ -118,69 +133,107 @@ class Scheduler:
     def decode_active_requests(self) -> None:
         if not self.active:
             return
+
         if self.batch_state is None:
             return
-        
+
         try:
+            decode_start = time.perf_counter()
+
             new_batch_state = self.runner.decode_one_token_batch(
                 request_states=self.active,
-                batch_state=self.batch_state
+                batch_state=self.batch_state,
             )
+
+            decode_end = time.perf_counter()
+            decode_time_seconds = decode_end - decode_start
+
             texts = new_batch_state["texts"]
 
-            for request_state, text in zip(self.active,texts):
+            tokens_generated_this_step = 0
+
+            for request_state, text in zip(self.active, texts):
                 if request_state.is_finished():
                     continue
+
                 if text:
                     request_state.append_text(text)
                 else:
                     request_state.mark_first_token()
-                
+
                 request_state.generated_tokens += 1
-            
+                tokens_generated_this_step += 1
+
+            if self.current_batch_metrics is not None:
+                self.current_batch_metrics.record_decode_step(
+                    decode_time_seconds=decode_time_seconds,
+                    tokens_generated_this_step=tokens_generated_this_step,
+                )
+
             self.batch_state = {
                 "past_key_values": new_batch_state["past_key_values"],
                 "next_tokens": new_batch_state["next_tokens"],
                 "attention_mask": new_batch_state["attention_mask"],
             }
-        
+
         except Exception as error:
             for request_state in self.active:
                 request_state.mark_failed(error)
-    
+
     def remove_finished_requests(self) -> None:
         if not self.active:
             return
-        
+
         failed_requests = [
             request_state
             for request_state in self.active
             if request_state.status == "failed"
         ]
+
         if failed_requests:
             completed_batch_size = len(self.active)
+
             for request_state in self.active:
                 if request_state.status != "failed":
                     request_state.mark_failed(
                         RuntimeError("Batch failed because one or more requests failed")
                     )
+
                 self.finished.append(request_state)
                 self.metrics_store.record_finished(request_state)
+
             self.completed_batch_sizes.append(completed_batch_size)
+
+            if self.current_batch_metrics is not None:
+                self.current_batch_metrics.mark_failed()
+                self.completed_batch_metrics.append(
+                    self.current_batch_metrics.to_dict()
+                )
+                self.current_batch_metrics = None
+
             self.active = []
             self.batch_state = None
             return
-        
+
         if not all(request_state.is_finished() for request_state in self.active):
             return
-        
+
         completed_batch_size = len(self.active)
-        
+
         for request_state in self.active:
             request_state.mark_finished()
             self.finished.append(request_state)
             self.metrics_store.record_finished(request_state)
+
         self.completed_batch_sizes.append(completed_batch_size)
+
+        if self.current_batch_metrics is not None:
+            self.current_batch_metrics.mark_finished()
+            self.completed_batch_metrics.append(
+                self.current_batch_metrics.to_dict()
+            )
+            self.current_batch_metrics = None
+
         self.active = []
         self.batch_state = None
 
@@ -207,5 +260,5 @@ class Scheduler:
             if self.step_sleep_seconds > 0:
                 time.sleep(self.step_sleep_seconds)
             elif not self.waiting and not self.active:
-                time.sleep(0.001)
+                time.sleep(0.01)
     
