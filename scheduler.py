@@ -74,7 +74,7 @@ class Scheduler:
                 "completed_batch_sizes_tail": self.completed_batch_sizes[-20:],
                 "completed_batch_metrics_count": len(self.completed_batch_metrics),
                 "has_current_batch_metrics": self.current_batch_metrics is not None,
-                "completed_batch_metrics_tail": self.completed_batch_metrics[-20:],
+                "completed_batch_metrics_tail": self.completed_batch_metrics[-100:],
             }
 
     def has_batch_capacity(self) -> bool:

@@ -84,3 +84,6 @@ Static microbatch engine:
 - Preserves per-request streaming.
 - Batch throughput scales from ~40 tok/s at batch size 1 to ~160 tok/s at batch size 4.
 - Queue wait remains near the batching window, showing concurrent requests are admitted together.
+
+Static microbatch validation:
+A batched prefill/decode engine was implemented with fixed-size active microbatches and per-request streaming. On Qwen2.5-0.5B with 32 generated tokens, decode wall time remained nearly flat from batch size 1 to 4, while batch-level throughput scaled from 36.02 tok/s to 143.00 tok/s. This validates that the server is performing real batched GPU execution rather than request-level serialization.

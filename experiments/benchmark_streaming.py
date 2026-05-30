@@ -323,10 +323,41 @@ def save_csv(rows: list[dict[str, Any]], output_path: str) -> None:
         writer.writerows(rows)
 
 
+def save_batch_metrics_csv(
+    batch_metrics: list[dict[str, Any]],
+    output_path: str,
+) -> None:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not batch_metrics:
+        return
+
+    headers = [
+        "batch_id",
+        "status",
+        "batch_size",
+        "prefill_time_seconds",
+        "decode_time_seconds_total",
+        "decode_steps",
+        "tokens_generated",
+        "batch_tokens_per_second",
+        "total_time_seconds",
+    ]
+
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(batch_metrics)
+
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     parser.add_argument("--output-path", default=RESULTS_PATH)
+    parser.add_argument(
+        "--batch-metrics-output-path",
+        default="results/benchmark_streaming_engine_batches.csv",
+    )
     args = parser.parse_args()
 
     rows = []
@@ -361,9 +392,25 @@ async def main() -> None:
 
     print_table(rows)
     save_csv(rows, args.output_path)
+    async with httpx.AsyncClient(
+        base_url=args.url,
+        timeout=None,
+    ) as metrics_client:
+        final_metrics = await fetch_metrics(metrics_client)
+
+    batch_metrics = final_metrics.get("engine", {}).get(
+        "completed_batch_metrics_tail",
+        [],
+    )
+
+    save_batch_metrics_csv(
+        batch_metrics=batch_metrics,
+        output_path=args.batch_metrics_output_path,
+    )
 
     print()
     print(f"Saved results to {args.output_path}")
+    print(f"Saved batch metrics to {args.batch_metrics_output_path}")
 
 
 if __name__ == "__main__":
