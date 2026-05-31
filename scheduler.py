@@ -153,7 +153,7 @@ class Scheduler:
             tokens_generated_this_step = 0
 
             for request_state, text in zip(self.active, texts):
-                if request_state.is_finished():
+                if request_state.status == "finished":
                     continue
 
                 if text:
@@ -163,6 +163,11 @@ class Scheduler:
 
                 request_state.generated_tokens += 1
                 tokens_generated_this_step += 1
+
+                if request_state.is_finished():
+                    request_state.mark_finished()
+                    self.finished.append(request_state)
+                    self.metrics_store.record_finished(request_state)
 
             if self.current_batch_metrics is not None:
                 self.current_batch_metrics.record_decode_step(
@@ -215,16 +220,10 @@ class Scheduler:
             self.batch_state = None
             return
 
-        if not all(request_state.is_finished() for request_state in self.active):
+        if not all(request_state.status == "finished" for request_state in self.active):
             return
 
         completed_batch_size = len(self.active)
-
-        for request_state in self.active:
-            request_state.mark_finished()
-            self.finished.append(request_state)
-            self.metrics_store.record_finished(request_state)
-
         self.completed_batch_sizes.append(completed_batch_size)
 
         if self.current_batch_metrics is not None:

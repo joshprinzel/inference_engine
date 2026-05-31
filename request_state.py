@@ -52,6 +52,12 @@ class RequestState:
         self.status = "finished"
         self.output_queue.put(None)
     
+    def mark_stream_finished(self) -> None:
+        if self.finish_time is None:
+            self.finish_time = time.perf_counter()
+        self.status = "finished"
+        self.output_queue.put(None)
+    
     def mark_failed(self, error: Exception) -> None:
         self.finish_time = time.perf_counter()
         self.status = "failed"
