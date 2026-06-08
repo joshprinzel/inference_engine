@@ -7,20 +7,32 @@ from request_queue import RequestQueue
 from request_state import RequestState
 from scheduler import Scheduler
 from schemas import GenerateRequest, GenerateResponse
-
+from continuous_scheduler import ContinuousScheduler
 
 app = FastAPI(title="Toy LLM Inference Server")
 
 runner = ModelRunner()
 request_queue = RequestQueue()
 metrics_store = MetricsStore()
-scheduler = Scheduler(
+
+# Normal Scheduluer from previous iteration
+# scheduler = Scheduler(
+#     runner=runner,
+#     request_queue=request_queue,
+#     metrics_store=metrics_store,
+#     max_batch_size=4,
+#     batch_wait_seconds=0.005
+# )
+
+
+# New Scheduler with Continous Scheduling semantics
+scheduler = ContinuousScheduler(
     runner=runner,
     request_queue=request_queue,
     metrics_store=metrics_store,
-    max_batch_size=4,
-    batch_wait_seconds=0.005
+    max_slots=4
 )
+
 
 
 @app.on_event("startup")

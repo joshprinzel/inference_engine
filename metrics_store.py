@@ -18,27 +18,36 @@ class MetricsStore:
                     "ttft_seconds": request_state.ttft_seconds,
                     "latency_seconds": request_state.latency_seconds,
                     "max_new_tokens": request_state.max_new_tokens,
+                    "generated_tokens": request_state.generated_tokens,
                     "output_chars": len(request_state.generated_text),
                     "error": request_state.error,
                 }
             )
     
-    def snapshot(self) -> dict[str,Any]:
+    def snapshot(self) -> dict[str, Any]:
         with self._lock:
             requests = list(self.finished_requests)
 
         if not requests:
             return {
                 "total_finished_requests": 0,
-                "requests": []
+                "total_generated_tokens": 0,
+                "requests": [],
             }
-        
+
         latencies = [r["latency_seconds"] for r in requests]
         ttfts = [r["ttft_seconds"] for r in requests]
         queue_waits = [r["queue_wait_seconds"] for r in requests]
 
+        generated_tokens = [
+            r.get("generated_tokens", 0)
+            for r in requests
+            if r.get("error") is None
+        ]
+
         return {
             "total_finished_requests": len(requests),
+            "total_generated_tokens": sum(generated_tokens),
             "avg_latency_seconds": sum(latencies) / len(latencies),
             "avg_ttft_seconds": sum(ttfts) / len(ttfts),
             "avg_queue_wait_seconds": sum(queue_waits) / len(queue_waits),
