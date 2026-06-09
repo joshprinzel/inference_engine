@@ -8,12 +8,17 @@ from request_state import RequestState
 from scheduler import Scheduler
 from schemas import GenerateRequest, GenerateResponse
 from continuous_scheduler import ContinuousScheduler
+from kv_block_manager import KVBlockManager
 
 app = FastAPI(title="Toy LLM Inference Server")
 
 runner = ModelRunner()
 request_queue = RequestQueue()
 metrics_store = MetricsStore()
+kv_block_manager = KVBlockManager(
+    total_blocks=128,
+    block_size_tokens=16
+)
 
 # Normal Scheduluer from previous iteration
 # scheduler = Scheduler(
@@ -30,8 +35,10 @@ scheduler = ContinuousScheduler(
     runner=runner,
     request_queue=request_queue,
     metrics_store=metrics_store,
+    kv_block_manager=kv_block_manager,
     max_slots=4
 )
+
 
 
 

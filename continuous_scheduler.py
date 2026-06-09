@@ -7,6 +7,7 @@ from metrics_store import MetricsStore
 from model_runner import ModelRunner
 from request_queue import RequestQueue
 from request_state import RequestState
+from kv_block_manager import KVBlockManager, KVBlockAllocationError
 
 
 class ContinuousScheduler:
@@ -27,12 +28,14 @@ class ContinuousScheduler:
             runner: ModelRunner,
             request_queue: RequestQueue,
             metrics_store: MetricsStore,
+            kv_block_manager: KVBlockManager,
             max_slots: int = 4,
             step_sleep_seconds: float = 0.0,
             idle_sleep_seconds: float = 0.01) -> None:
         self.runner = runner
         self.request_queue = request_queue
         self.metrics_store = metrics_store
+        self.kv_block_manager = kv_block_manager
 
         self.max_slots = max_slots
         self.step_sleep_seconds = step_sleep_seconds
@@ -96,6 +99,7 @@ class ContinuousScheduler:
                 "active": self.occupied_slot_count(),
                 "finished": len(self.finished),
                 "max_slots": self.max_slots,
+                "kv_cache": self.kv_block_manager.snapshot(),
                 "slots": [
                     None if request_state is None else{
                         "request_id": request_state.request_id,
@@ -106,7 +110,7 @@ class ContinuousScheduler:
                     for request_state in self.slots
                 ],
                 "admitted_count": self.admitted_count,
-                "decode_steps": self.decode_steps,
+                "decode_iterations": self.decode_steps,
                 "late_admissions": self.late_admissions,
                 "early_finishes": self.early_finishes,
                 "queue_length_history_tail": self.queue_length_history[-20:],
@@ -153,7 +157,14 @@ class ContinuousScheduler:
 
             try:
                 self.runner.init_request_state(request_state)
-            except Exception as error:
+
+                request_id = str(request_state.request_id)
+                block_table = self.kv_block_manager.allocate_for_tokens(
+                    request_id=request_id,
+                    num_tokens=request_state.prompt_tokens
+                )
+            except (KVBlockAllocationError, Exception) as error:
+                self.kv_block_manager.free(request_state.request_id)
                 request_state.mark_failed(error)
                 self.finished.append(request_state)
                 self.metrics_store.record_finished(request_state)
@@ -186,6 +197,11 @@ class ContinuousScheduler:
                 continue
 
             try:
+                request_id = str(request_state.request_id)
+                token_position = request_state.prompt_tokens + request_state.generated_tokens
+
+                self.kv_block_manager.ensure_capacity_for_token(request_id=request_id, token_position=token_position)
+                request_state.block_table = self.kv_block_manager.get_block_tables(request_id)
                 text = self.runner.decode_one_token(request_state)
                 if text:
                     request_state.append_text(text)
@@ -195,6 +211,8 @@ class ContinuousScheduler:
                 request_state.generated_tokens += 1
                 self.tokens_generated += 1
 
+                request_state.num_computed_tokens = (request_state.prompt_tokens + request_state.generated_tokens)
+
                 if request_state.is_finished():
                     print(
                         f"finished request_id={request_state.request_id} "
@@ -202,6 +220,7 @@ class ContinuousScheduler:
                         f"max_new_tokens={request_state.max_new_tokens}",
                         flush=True
                     )
+                    self.kv_block_manager.free(str(request_state.request_id))
                     request_state.mark_finished()
                     self.finished.append(request_state)
                     self.metrics_store.record_finished(request_state)
@@ -210,6 +229,7 @@ class ContinuousScheduler:
                     self.early_finishes += 1
             
             except Exception as error:
+                self.kv_block_manager.free(str(request_state.request_id))
                 request_state.mark_failed(error)
                 self.finished.append(request_state)
                 self.metrics_store.record_finished(request_state)

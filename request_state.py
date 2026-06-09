@@ -31,6 +31,9 @@ class RequestState:
     next_token: Any = None
     prompt_tokens: int = 0
 
+    block_table: list[int] | None = None
+    num_computed_tokens: int = 0
+
     def mark_admitted(self) -> None:
         self.admit_time = time.perf_counter()
         self.status = "prefill"
