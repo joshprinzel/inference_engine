@@ -61,6 +61,10 @@ class ContinuousScheduler:
         self.late_admissions = 0
         self.early_finishes = 0
 
+        self.decode_stalls = 0
+        self.kv_allocation_failures = 0
+        self.kv_oom_evictions = 0
+
     
 
     #----------------------------------------------------------------------------------------
@@ -111,6 +115,9 @@ class ContinuousScheduler:
                 ],
                 "admitted_count": self.admitted_count,
                 "decode_iterations": self.decode_steps,
+                "decode_stalls": self.decode_stalls,
+                "kv_allocation_failures": self.kv_allocation_failures,
+                "kv_oom_evictions": self.kv_oom_evictions,
                 "late_admissions": self.late_admissions,
                 "early_finishes": self.early_finishes,
                 "queue_length_history_tail": self.queue_length_history[-20:],
@@ -156,15 +163,26 @@ class ContinuousScheduler:
             )
 
             try:
-                self.runner.init_request_state(request_state)
+                prompt_tokens = self.runner.count_prompt_tokens(request_state.prompt)
+                reserved_tokens = prompt_tokens + request_state.max_new_tokens
 
+                if not self.kv_block_manager.can_allocate_tokens(reserved_tokens):
+                    self.waiting.insert(0,request_state)
+                    return
+                
                 request_id = str(request_state.request_id)
                 block_table = self.kv_block_manager.allocate_for_tokens(
                     request_id=request_id,
                     num_tokens=request_state.prompt_tokens
                 )
+                
+                request_state.block_table = block_table
+                request_state.prompt_tokens = prompt_tokens
+
+                self.runner.init_request_state(request_state)
+                request_state.num_computed_tokens = request_state.prompt_tokens                
             except (KVBlockAllocationError, Exception) as error:
-                self.kv_block_manager.free(request_state.request_id)
+                self.kv_block_manager.free(str(request_state.request_id))
                 request_state.mark_failed(error)
                 self.finished.append(request_state)
                 self.metrics_store.record_finished(request_state)
@@ -188,6 +206,9 @@ class ContinuousScheduler:
         
         self.decode_steps += 1
 
+        decoded_any = False
+        stalled_indices: list[int] = []
+
         for index in occupied_indices:
             request_state = self.slots[index]
 
@@ -200,7 +221,17 @@ class ContinuousScheduler:
                 request_id = str(request_state.request_id)
                 token_position = request_state.prompt_tokens + request_state.generated_tokens
 
-                self.kv_block_manager.ensure_capacity_for_token(request_id=request_id, token_position=token_position)
+                try:
+                    self.kv_block_manager.ensure_capacity_for_token(
+                        request_id=request_id,
+                        token_position=token_position
+                    )
+                except KVBlockAllocationError:
+                    self.decode_stalls += 1
+                    self.kv_allocation_failures += 1
+                    stalled_indices.append(index)
+                    continue
+
                 request_state.block_table = self.kv_block_manager.get_block_tables(request_id)
                 text = self.runner.decode_one_token(request_state)
                 if text:
@@ -212,6 +243,8 @@ class ContinuousScheduler:
                 self.tokens_generated += 1
 
                 request_state.num_computed_tokens = (request_state.prompt_tokens + request_state.generated_tokens)
+
+                decoded_any = True
 
                 if request_state.is_finished():
                     print(
@@ -234,6 +267,27 @@ class ContinuousScheduler:
                 self.finished.append(request_state)
                 self.metrics_store.record_finished(request_state)
                 self.slots[index] = None
+        
+        if not decoded_any and stalled_indices:
+            victim_index = stalled_indices[-1]
+            victim = self.slots[victim_index]
+
+            if victim is not None:
+                self.kv_block_manager.free(str(victim.request_id))
+
+                victim.mark_failed(
+                    RuntimeError(
+                        "KV cache exhausted: request evicted to break decode-time "
+                        "memory deadlock"
+
+                    )
+                )
+
+                self.finished.append(victim)
+                self.metrics_store.record_finished(victim)
+
+                self.slots[victim_index] = None
+                self.kv_oom_evictions += 1
     
 
     def record_history(self) -> None:

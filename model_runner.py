@@ -259,6 +259,12 @@ class ModelRunner:
         request_state.generated_tokens += 1
         return text
     
+
+    def count_prompt_tokens(self, prompt: str) -> int:
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        return int(inputs["input_ids"].shape[-1])
+
+    
     def benchmark_prefill_decode(
             self,
             prompt: str,

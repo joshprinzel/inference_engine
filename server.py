@@ -16,7 +16,7 @@ runner = ModelRunner()
 request_queue = RequestQueue()
 metrics_store = MetricsStore()
 kv_block_manager = KVBlockManager(
-    total_blocks=128,
+    total_blocks=16,
     block_size_tokens=16
 )
 
