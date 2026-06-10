@@ -8,6 +8,7 @@ from model_runner import ModelRunner
 from request_queue import RequestQueue
 from request_state import RequestState
 from kv_block_manager import KVBlockManager, KVBlockAllocationError
+from decode_batch import DecodeBatch, build_decode_batch
 
 
 class ContinuousScheduler:
@@ -65,6 +66,9 @@ class ContinuousScheduler:
         self.kv_allocation_failures = 0
         self.kv_oom_evictions = 0
 
+        self.last_decode_batch_snapshot: dict | None = None
+        self.decode_batches_built = 0
+
     
 
     #----------------------------------------------------------------------------------------
@@ -118,6 +122,8 @@ class ContinuousScheduler:
                 "decode_stalls": self.decode_stalls,
                 "kv_allocation_failures": self.kv_allocation_failures,
                 "kv_oom_evictions": self.kv_oom_evictions,
+                "decode_batches_built": self.decode_batches_built,
+                "last_decode_batch": self.last_decode_batch_snapshot,
                 "late_admissions": self.late_admissions,
                 "early_finishes": self.early_finishes,
                 "queue_length_history_tail": self.queue_length_history[-20:],
@@ -205,6 +211,28 @@ class ContinuousScheduler:
             return
         
         self.decode_steps += 1
+
+        active_request_states = [
+            self.slots[index]
+            for index in occupied_indices
+            if self.slots[index] is not None
+        ]
+
+        try:
+            decode_batch = build_decode_batch(
+                request_states=active_request_states,
+                kv_block_manager=self.kv_block_manager,
+                device=self.runner.device
+            )
+            self.last_decode_batch_snapshot = decode_batch.snapshot()
+            self.decode_batches_built += 1
+
+        except Exception as error:
+            #DecodeBatch is instrumentation for now. Do not kill serving metadata
+            # lowering fails during development
+            self.last_decode_batch_snapshot = {
+                "error": repr(error)
+            }
 
         decoded_any = False
         stalled_indices: list[int] = []
