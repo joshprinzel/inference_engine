@@ -1,0 +1,309 @@
+{
+  "bench_name": "paged_attention_cuda_v2_bench",
+  "kernel_name": "paged_attention_cuda_v2",
+  "created_at": "2026-06-11T22:22:05",
+  "loaded_extension": "/mnt/c/Users/joshp_ya/VSCodeProjects/Personal/portfolio/llm-inference-systems-lab/inference-server/cuda_backend/paged_attention_cuda.cpython-313-x86_64-linux-gnu.so",
+  "torch_version": "2.12.0+cu130",
+  "cuda_version": "13.0",
+  "device_name": "NVIDIA GeForce RTX 4070 Laptop GPU",
+  "warmup_iters": 50,
+  "bench_iters": 500,
+  "all_passed": true,
+  "results": [
+    {
+      "kernel_name": "paged_attention_cuda_v2",
+      "seq_len": 1,
+      "seed": 0,
+      "passed": true,
+      "max_abs_diff": 0.0,
+      "reference_ms": 0.330397705078125,
+      "cuda_ms": 0.024971263885498047,
+      "speedup_vs_reference": 13.231116638433429,
+      "block_table": [
+        0
+      ],
+      "num_blocks": 1,
+      "layout": {
+        "num_layers": 2,
+        "total_blocks": 512,
+        "block_size_tokens": 8,
+        "num_kv_heads": 2,
+        "head_dim": 32,
+        "dtype": "float16",
+        "device": "cuda",
+        "key_cache_shape": [
+          2,
+          512,
+          8,
+          2,
+          32
+        ],
+        "value_cache_shape": [
+          2,
+          512,
+          8,
+          2,
+          32
+        ],
+        "tokens_capacity": 4096
+      },
+      "warmup_iters": 50,
+      "bench_iters": 500
+    },
+    {
+      "kernel_name": "paged_attention_cuda_v2",
+      "seq_len": 8,
+      "seed": 1,
+      "passed": true,
+      "max_abs_diff": 0.0,
+      "reference_ms": 0.32742196655273437,
+      "cuda_ms": 0.021202943801879884,
+      "speedup_vs_reference": 15.4422880903785,
+      "block_table": [
+        0
+      ],
+      "num_blocks": 1,
+      "layout": {
+        "num_layers": 2,
+        "total_blocks": 512,
+        "block_size_tokens": 8,
+        "num_kv_heads": 2,
+        "head_dim": 32,
+        "dtype": "float16",
+        "device": "cuda",
+        "key_cache_shape": [
+          2,
+          512,
+          8,
+          2,
+          32
+        ],
+        "value_cache_shape": [
+          2,
+          512,
+          8,
+          2,
+          32
+        ],
+        "tokens_capacity": 4096
+      },
+      "warmup_iters": 50,
+      "bench_iters": 500
+    },
+    {
+      "kernel_name": "paged_attention_cuda_v2",
+      "seq_len": 19,
+      "seed": 2,
+      "passed": true,
+      "max_abs_diff": 0.0,
+      "reference_ms": 0.3483955078125,
+      "cuda_ms": 0.03947724914550781,
+      "speedup_vs_reference": 8.825222510524004,
+      "block_table": [
+        0,
+        1,
+        2
+      ],
+      "num_blocks": 3,
+      "layout": {
+        "num_layers": 2,
+        "total_blocks": 512,
+        "block_size_tokens": 8,
+        "num_kv_heads": 2,
+        "head_dim": 32,
+        "dtype": "float16",
+        "device": "cuda",
+        "key_cache_shape": [
+          2,
+          512,
+          8,
+          2,
+          32
+        ],
+        "value_cache_shape": [
+          2,
+          512,
+          8,
+          2,
+          32
+        ],
+        "tokens_capacity": 4096
+      },
+      "warmup_iters": 50,
+      "bench_iters": 500
+    },
+    {
+      "kernel_name": "paged_attention_cuda_v2",
+      "seq_len": 64,
+      "seed": 3,
+      "passed": true,
+      "max_abs_diff": 0.0,
+      "reference_ms": 0.687994873046875,
+      "cuda_ms": 0.12582707214355468,
+      "speedup_vs_reference": 5.467780989626378,
+      "block_table": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "num_blocks": 8,
+      "layout": {
+        "num_layers": 2,
+        "total_blocks": 512,
+        "block_size_tokens": 8,
+        "num_kv_heads": 2,
+        "head_dim": 32,
+        "dtype": "float16",
+        "device": "cuda",
+        "key_cache_shape": [
+          2,
+          512,
+          8,
+          2,
+          32
+        ],
+        "value_cache_shape": [
+          2,
+          512,
+          8,
+          2,
+          32
+        ],
+        "tokens_capacity": 4096
+      },
+      "warmup_iters": 50,
+      "bench_iters": 500
+    },
+    {
+      "kernel_name": "paged_attention_cuda_v2",
+      "seq_len": 128,
+      "seed": 4,
+      "passed": true,
+      "max_abs_diff": 0.0,
+      "reference_ms": 1.0314854736328125,
+      "cuda_ms": 0.23985971069335937,
+      "speedup_vs_reference": 4.300369873085859,
+      "block_table": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "num_blocks": 16,
+      "layout": {
+        "num_layers": 2,
+        "total_blocks": 512,
+        "block_size_tokens": 8,
+        "num_kv_heads": 2,
+        "head_dim": 32,
+        "dtype": "float16",
+        "device": "cuda",
+        "key_cache_shape": [
+          2,
+          512,
+          8,
+          2,
+          32
+        ],
+        "value_cache_shape": [
+          2,
+          512,
+          8,
+          2,
+          32
+        ],
+        "tokens_capacity": 4096
+      },
+      "warmup_iters": 50,
+      "bench_iters": 500
+    },
+    {
+      "kernel_name": "paged_attention_cuda_v2",
+      "seq_len": 256,
+      "seed": 5,
+      "passed": true,
+      "max_abs_diff": 0.0,
+      "reference_ms": 1.8780426025390624,
+      "cuda_ms": 0.3979673461914062,
+      "speedup_vs_reference": 4.719087182685083,
+      "block_table": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31
+      ],
+      "num_blocks": 32,
+      "layout": {
+        "num_layers": 2,
+        "total_blocks": 512,
+        "block_size_tokens": 8,
+        "num_kv_heads": 2,
+        "head_dim": 32,
+        "dtype": "float16",
+        "device": "cuda",
+        "key_cache_shape": [
+          2,
+          512,
+          8,
+          2,
+          32
+        ],
+        "value_cache_shape": [
+          2,
+          512,
+          8,
+          2,
+          32
+        ],
+        "tokens_capacity": 4096
+      },
+      "warmup_iters": 50,
+      "bench_iters": 500
+    }
+  ]
+}
