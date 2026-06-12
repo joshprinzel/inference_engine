@@ -9,6 +9,15 @@ torch::Tensor paged_attention_decode_cuda(
     int64_t seq_len
 );
 
+torch::Tensor paged_attention_decode_batch_cuda(
+    torch::Tensor q,
+    torch::Tensor key_cache,
+    torch::Tensor value_cache,
+    torch::Tensor block_tables,
+    torch::Tensor seq_lens,
+    int64_t layer_id
+);
+
 torch::Tensor paged_attention_decode(
     torch::Tensor q,
     torch::Tensor key_cache,
@@ -50,10 +59,58 @@ torch::Tensor paged_attention_decode(
     );
 }
 
+torch::Tensor paged_attention_decode_batch(
+    torch::Tensor q,
+    torch::Tensor key_cache,
+    torch::Tensor value_cache,
+    torch::Tensor block_tables,
+    torch::Tensor seq_lens,
+    int64_t layer_id
+) {
+    TORCH_CHECK(q.is_cuda(), "q must be CUDA");
+    TORCH_CHECK(key_cache.is_cuda(), "key_cache must be CUDA");
+    TORCH_CHECK(value_cache.is_cuda(), "value_cache must be CUDA");
+    TORCH_CHECK(block_tables.is_cuda(), "block_tables must be CUDA");
+    TORCH_CHECK(seq_lens.is_cuda(), "seq_lens must be CUDA");
+
+    TORCH_CHECK(q.scalar_type() == torch::kFloat16, "q must be float16");
+    TORCH_CHECK(key_cache.scalar_type() == torch::kFloat16, "key_cache must be float16");
+    TORCH_CHECK(value_cache.scalar_type() == torch::kFloat16, "value_cache must be float16");
+    TORCH_CHECK(block_tables.scalar_type() == torch::kInt32, "block_tables must be int32");
+    TORCH_CHECK(seq_lens.scalar_type() == torch::kInt32, "seq_lens must be int32");
+
+    TORCH_CHECK(q.dim() == 3, "q must have shape [batch, heads, head_dim]");
+    TORCH_CHECK(block_tables.dim() == 2, "block_tables must have shape [batch, max_blocks]");
+    TORCH_CHECK(seq_lens.dim() == 1, "seq_lens must have shape [batch]");
+
+    TORCH_CHECK(key_cache.dim() == 5, "key_cache must have shape [layers, blocks, block_size, heads, head_dim]");
+    TORCH_CHECK(value_cache.dim() == 5, "value_cache must have shape [layers, blocks, block_size, heads, head_dim]");
+
+    TORCH_CHECK(q.size(0) == block_tables.size(0), "batch size mismatch");
+    TORCH_CHECK(q.size(0) == seq_lens.size(0), "batch size mismatch");
+    TORCH_CHECK(q.size(1) == key_cache.size(3), "num_heads mismatch");
+    TORCH_CHECK(q.size(2) == key_cache.size(4), "head_dim mismatch");
+
+    return paged_attention_decode_batch_cuda(
+        q.contiguous(),
+        key_cache.contiguous(),
+        value_cache.contiguous(),
+        block_tables.contiguous(),
+        seq_lens.contiguous(),
+        layer_id
+    );
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
         "paged_attention_decode",
         &paged_attention_decode,
         "Paged attention decode v1"
+    );
+
+    m.def(
+        "paged_attention_decode_batch",
+        &paged_attention_decode_batch,
+        "Paged attention decode batch"
     );
 }
