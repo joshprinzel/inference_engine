@@ -17,10 +17,10 @@ from paged_attention_reference import paged_attention_decode_reference
 import paged_attention_cuda
 
 
-KERNEL_NAME = "paged_attention_cuda_v2"
+KERNEL_NAME = "paged_attention_cuda_v3_score_reuse"
 BENCH_NAME = f"{KERNEL_NAME}_bench"
 
-SEQ_LENS = [1, 8, 19, 64, 128, 256]
+SEQ_LENS = [1, 8, 19, 64, 128, 256,512]
 BLOCK_SIZE_TOKENS = 8
 NUM_LAYERS = 2
 TOTAL_BLOCKS = 512
