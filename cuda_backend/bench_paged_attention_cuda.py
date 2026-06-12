@@ -18,19 +18,39 @@ import paged_attention_cuda
 
 
 KERNEL_NAME = "paged_attention_cuda_v3_score_reuse"
-BENCH_NAME = f"{KERNEL_NAME}_bench"
+BENCH_NAME = f"{KERNEL_NAME}_shape_sweep_bench"
 
-SEQ_LENS = [1, 8, 19, 64, 128, 256,512]
+SEQ_LENS = [64, 128, 256, 512]
+
+BENCH_CONFIGS = [
+    {"num_kv_heads": 2, "head_dim": 32},
+    {"num_kv_heads": 8, "head_dim": 64},
+    {"num_kv_heads": 16, "head_dim": 128},
+]
+
 BLOCK_SIZE_TOKENS = 8
 NUM_LAYERS = 2
 TOTAL_BLOCKS = 512
-NUM_KV_HEADS = 2
-HEAD_DIM = 32
 DTYPE = "float16"
 DEVICE = "cuda"
 
-WARMUP_ITERS = 50
-BENCH_ITERS = 500
+DEFAULT_WARMUP_ITERS = 25
+
+
+def bench_iters_for_case(
+    seq_len: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> int:
+    work = seq_len * num_kv_heads * head_dim
+
+    if work <= 64 * 2 * 32:
+        return 1000
+
+    if work <= 256 * 8 * 64:
+        return 300
+
+    return 100
 
 
 def fill_request_kv(
@@ -65,6 +85,8 @@ def fill_request_kv(
 
 def make_case(
     seq_len: int,
+    num_kv_heads: int,
+    head_dim: int,
     seed: int,
 ) -> dict[str, Any]:
     torch.manual_seed(seed)
@@ -73,8 +95,8 @@ def make_case(
         num_layers=NUM_LAYERS,
         total_blocks=TOTAL_BLOCKS,
         block_size_tokens=BLOCK_SIZE_TOKENS,
-        num_kv_heads=NUM_KV_HEADS,
-        head_dim=HEAD_DIM,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
         dtype=DTYPE,
         device=DEVICE,
     )
@@ -88,7 +110,7 @@ def make_case(
     cache_pool.zero_()
 
     layer_id = 0
-    request_id = f"bench-req-seq-{seq_len}"
+    request_id = f"bench-req-h{num_kv_heads}-d{head_dim}-s{seq_len}"
 
     block_table = block_manager.allocate_for_tokens(
         request_id=request_id,
@@ -120,6 +142,8 @@ def make_case(
         "cache_pool": cache_pool,
         "layer_id": layer_id,
         "seq_len": seq_len,
+        "num_kv_heads": num_kv_heads,
+        "head_dim": head_dim,
         "block_table": block_table,
         "block_table_tensor": block_table_tensor,
         "q": q,
@@ -153,9 +177,16 @@ def benchmark_cuda_events(
 
 def run_one_case(
     seq_len: int,
+    num_kv_heads: int,
+    head_dim: int,
     seed: int,
 ) -> dict[str, Any]:
-    case = make_case(seq_len=seq_len, seed=seed)
+    case = make_case(
+        seq_len=seq_len,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        seed=seed,
+    )
 
     layout: KVCacheLayout = case["layout"]
     cache_pool: KVCachePool = case["cache_pool"]
@@ -163,6 +194,13 @@ def run_one_case(
     block_table: list[int] = case["block_table"]
     block_table_tensor: torch.Tensor = case["block_table_tensor"]
     q: torch.Tensor = case["q"]
+
+    warmup_iters = DEFAULT_WARMUP_ITERS
+    bench_iters = bench_iters_for_case(
+        seq_len=seq_len,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+    )
 
     def run_reference() -> torch.Tensor:
         return paged_attention_decode_reference(
@@ -188,41 +226,56 @@ def run_one_case(
 
     diff = cuda_output.float() - reference_output.float()
     max_abs_diff = diff.abs().max().item()
+
+    reference_finite = torch.isfinite(reference_output).all().item()
+    cuda_finite = torch.isfinite(cuda_output).all().item()
+    diff_finite = torch.isfinite(diff).all().item()
+
     passed = (
-        torch.isfinite(reference_output).all().item()
-        and torch.isfinite(cuda_output).all().item()
-        and torch.isfinite(diff).all().item()
+        reference_finite
+        and cuda_finite
+        and diff_finite
         and max_abs_diff < 1e-2
     )
 
     reference_ms = benchmark_cuda_events(
         fn=run_reference,
-        warmup_iters=WARMUP_ITERS,
-        bench_iters=BENCH_ITERS,
+        warmup_iters=warmup_iters,
+        bench_iters=bench_iters,
     )
 
     cuda_ms = benchmark_cuda_events(
         fn=run_cuda,
-        warmup_iters=WARMUP_ITERS,
-        bench_iters=BENCH_ITERS,
+        warmup_iters=warmup_iters,
+        bench_iters=bench_iters,
     )
 
     speedup_vs_reference = reference_ms / cuda_ms if cuda_ms > 0 else float("inf")
 
+    tokens_per_ms = seq_len / cuda_ms if cuda_ms > 0 else float("inf")
+    elements_per_ms = (seq_len * num_kv_heads * head_dim) / cuda_ms if cuda_ms > 0 else float("inf")
+
     return {
         "kernel_name": KERNEL_NAME,
         "seq_len": seq_len,
+        "num_kv_heads": num_kv_heads,
+        "head_dim": head_dim,
         "seed": seed,
         "passed": bool(passed),
         "max_abs_diff": max_abs_diff,
+        "reference_finite": bool(reference_finite),
+        "cuda_finite": bool(cuda_finite),
+        "diff_finite": bool(diff_finite),
         "reference_ms": reference_ms,
         "cuda_ms": cuda_ms,
         "speedup_vs_reference": speedup_vs_reference,
+        "tokens_per_ms": tokens_per_ms,
+        "elements_per_ms": elements_per_ms,
         "block_table": block_table,
         "num_blocks": len(block_table),
         "layout": layout.snapshot(),
-        "warmup_iters": WARMUP_ITERS,
-        "bench_iters": BENCH_ITERS,
+        "warmup_iters": warmup_iters,
+        "bench_iters": bench_iters,
     }
 
 
@@ -240,8 +293,12 @@ def write_json_report(
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         "device_name": torch.cuda.get_device_name(0),
-        "warmup_iters": WARMUP_ITERS,
-        "bench_iters": BENCH_ITERS,
+        "seq_lens": SEQ_LENS,
+        "bench_configs": BENCH_CONFIGS,
+        "block_size_tokens": BLOCK_SIZE_TOKENS,
+        "total_blocks": TOTAL_BLOCKS,
+        "dtype": DTYPE,
+        "default_warmup_iters": DEFAULT_WARMUP_ITERS,
         "all_passed": all(result["passed"] for result in results),
         "results": results,
     }
@@ -256,7 +313,6 @@ def write_markdown_report(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     all_passed = all(result["passed"] for result in results)
-    first_layout = results[0]["layout"] if results else {}
 
     lines = []
 
@@ -265,11 +321,13 @@ def write_markdown_report(
     lines.append("## Goal")
     lines.append("")
     lines.append(
-        "Benchmark the CUDA paged attention decode kernel against the PyTorch "
-        "reference implementation across increasing sequence lengths."
+        "Benchmark the CUDA paged attention decode kernel across a small matrix of "
+        "sequence lengths, KV head counts, and head dimensions."
     )
     lines.append("")
-    lines.append("This benchmark is intended for iteration guidance, not final production performance claims.")
+    lines.append(
+        "This benchmark is intended for kernel iteration guidance, not final production performance claims."
+    )
     lines.append("")
     lines.append("## Environment")
     lines.append("")
@@ -280,36 +338,35 @@ def write_markdown_report(
     lines.append("")
     lines.append("## Benchmark Config")
     lines.append("")
-    lines.append(f"- Warmup iterations: `{WARMUP_ITERS}`")
-    lines.append(f"- Benchmark iterations: `{BENCH_ITERS}`")
+    lines.append(f"- Sequence lengths: `{SEQ_LENS}`")
+    lines.append(f"- Shape configs: `{BENCH_CONFIGS}`")
     lines.append(f"- Block size tokens: `{BLOCK_SIZE_TOKENS}`")
     lines.append(f"- Total blocks: `{TOTAL_BLOCKS}`")
-    lines.append(f"- Num KV heads: `{NUM_KV_HEADS}`")
-    lines.append(f"- Head dim: `{HEAD_DIM}`")
     lines.append(f"- Dtype: `{DTYPE}`")
-    lines.append("")
-    lines.append("## Layout")
-    lines.append("")
-    lines.append(f"- num_layers: `{first_layout.get('num_layers')}`")
-    lines.append(f"- total_blocks: `{first_layout.get('total_blocks')}`")
-    lines.append(f"- block_size_tokens: `{first_layout.get('block_size_tokens')}`")
-    lines.append(f"- num_kv_heads: `{first_layout.get('num_kv_heads')}`")
-    lines.append(f"- head_dim: `{first_layout.get('head_dim')}`")
-    lines.append(f"- dtype: `{first_layout.get('dtype')}`")
+    lines.append(f"- Default warmup iterations: `{DEFAULT_WARMUP_ITERS}`")
     lines.append("")
     lines.append("## Results")
     lines.append("")
-    lines.append("| seq_len | blocks | max_abs_diff | reference ms | cuda ms | speedup | passed |")
-    lines.append("|---:|---:|---:|---:|---:|---:|---|")
+    lines.append(
+        "| heads | head_dim | seq_len | blocks | max_abs_diff | reference ms | cuda ms | speedup | tok/ms | elems/ms | iters | passed |"
+    )
+    lines.append(
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"
+    )
 
     for result in results:
         lines.append(
+            f"| {result['num_kv_heads']} "
+            f"| {result['head_dim']} "
             f"| {result['seq_len']} "
             f"| {result['num_blocks']} "
             f"| {result['max_abs_diff']:.8f} "
             f"| {result['reference_ms']:.6f} "
             f"| {result['cuda_ms']:.6f} "
             f"| {result['speedup_vs_reference']:.2f}x "
+            f"| {result['tokens_per_ms']:.2f} "
+            f"| {result['elements_per_ms']:.2f} "
+            f"| {result['bench_iters']} "
             f"| {result['passed']} |"
         )
 
@@ -325,15 +382,15 @@ def write_markdown_report(
     lines.append("")
     lines.append(
         "The PyTorch reference is intentionally simple and includes Python-level looping over the paged KV cache. "
-        "The CUDA kernel should increasingly benefit as sequence length grows, but this v2 kernel still recomputes "
-        "QK scores multiple times and is not expected to represent final performance."
+        "The CUDA kernel should increasingly benefit as sequence length, head count, and head dimension grow. "
+        "This v3 kernel stores QK scores once in shared memory and reuses them for softmax denominator and value accumulation."
     )
     lines.append("")
     lines.append("## Next Kernel Question")
     lines.append("")
     lines.append(
-        "If v2 is not significantly faster, the likely bottleneck is repeated QK score recomputation. "
-        "The next iteration should consider storing scores or using an online softmax structure."
+        "The next optimization question is whether v3 is limited by serial denominator computation, scalar V loads, "
+        "one-CTA-per-head work granularity, or lack of batching across requests."
     )
     lines.append("")
 
@@ -344,17 +401,26 @@ def print_terminal_summary(results: list[dict[str, Any]]) -> None:
     print(BENCH_NAME)
     print("---")
     print("loaded extension:", paged_attention_cuda.__file__)
-    print("seq_len | blocks | max_abs_diff | reference_ms | cuda_ms | speedup | passed")
-    print("--- | --- | --- | --- | --- | --- | ---")
+    print(
+        "heads | head_dim | seq_len | blocks | max_abs_diff | reference_ms | cuda_ms | speedup | tok/ms | elems/ms | iters | passed"
+    )
+    print(
+        "--- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---"
+    )
 
     for result in results:
         print(
+            f"{result['num_kv_heads']} | "
+            f"{result['head_dim']} | "
             f"{result['seq_len']} | "
             f"{result['num_blocks']} | "
             f"{result['max_abs_diff']:.8f} | "
             f"{result['reference_ms']:.6f} | "
             f"{result['cuda_ms']:.6f} | "
             f"{result['speedup_vs_reference']:.2f}x | "
+            f"{result['tokens_per_ms']:.2f} | "
+            f"{result['elements_per_ms']:.2f} | "
+            f"{result['bench_iters']} | "
             f"{result['passed']}"
         )
 
@@ -367,13 +433,18 @@ def main() -> None:
         raise RuntimeError("CUDA is required for this benchmark")
 
     results = []
+    case_index = 0
 
-    for index, seq_len in enumerate(SEQ_LENS):
-        result = run_one_case(
-            seq_len=seq_len,
-            seed=index,
-        )
-        results.append(result)
+    for config in BENCH_CONFIGS:
+        for seq_len in SEQ_LENS:
+            result = run_one_case(
+                seq_len=seq_len,
+                num_kv_heads=config["num_kv_heads"],
+                head_dim=config["head_dim"],
+                seed=case_index,
+            )
+            results.append(result)
+            case_index += 1
 
     print_terminal_summary(results)
 
