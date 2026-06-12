@@ -1,0 +1,25 @@
+{
+  "configurations": [
+    {
+      "name": "WSL",
+      "includePath": [
+        "${workspaceFolder}/**",
+        "/home/joshp/miniforge3/include/python3.13",
+        "/home/joshp/miniforge3/lib/python3.13/site-packages/torch/include",
+        "/home/joshp/miniforge3/lib/python3.13/site-packages/torch/include/torch/csrc/api/include",
+        "/usr/local/cuda/include"
+      ],
+      "defines": [
+        "TORCH_EXTENSION_NAME=paged_attention_cuda",
+        "TORCH_API_INCLUDE_EXTENSION_H",
+        "__CUDACC__"
+      ],
+      "compilerPath": "/usr/bin/g++",
+      "cudaPath": "/usr/local/cuda",
+      "cStandard": "c17",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "linux-gcc-x64"
+    }
+  ],
+  "version": 4
+}

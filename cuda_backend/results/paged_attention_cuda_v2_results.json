@@ -1,0 +1,390 @@
+{
+  "kernel_name": "paged_attention_cuda_v2",
+  "created_at": "2026-06-11T21:50:30",
+  "loaded_extension": "/mnt/c/Users/joshp_ya/VSCodeProjects/Personal/portfolio/llm-inference-systems-lab/inference-server/cuda_backend/paged_attention_cuda.cpython-313-x86_64-linux-gnu.so",
+  "torch_version": "2.12.0+cu130",
+  "cuda_version": "13.0",
+  "device_name": "NVIDIA GeForce RTX 4070 Laptop GPU",
+  "max_allowed_diff": 0.01,
+  "all_passed": true,
+  "results": [
+    {
+      "kernel_name": "paged_attention_cuda_v2",
+      "seq_len": 1,
+      "seed": 0,
+      "passed": true,
+      "max_abs_diff": 0.0,
+      "reference_finite": true,
+      "cuda_finite": true,
+      "diff_finite": true,
+      "layout": {
+        "num_layers": 2,
+        "total_blocks": 16,
+        "block_size_tokens": 8,
+        "num_kv_heads": 2,
+        "head_dim": 32,
+        "dtype": "float16",
+        "device": "cuda",
+        "key_cache_shape": [
+          2,
+          16,
+          8,
+          2,
+          32
+        ],
+        "value_cache_shape": [
+          2,
+          16,
+          8,
+          2,
+          32
+        ],
+        "tokens_capacity": 128
+      },
+      "block_table": [
+        0
+      ],
+      "reference_output_shape": [
+        2,
+        32
+      ],
+      "cuda_output_shape": [
+        2,
+        32
+      ],
+      "cuda_output_sample": [
+        0.1807861328125,
+        -0.55224609375,
+        0.923828125,
+        -0.73486328125,
+        1.3798828125,
+        0.86767578125,
+        0.129638671875,
+        -0.9404296875
+      ],
+      "reference_output_sample": [
+        0.1807861328125,
+        -0.55224609375,
+        0.923828125,
+        -0.73486328125,
+        1.3798828125,
+        0.86767578125,
+        0.129638671875,
+        -0.9404296875
+      ],
+      "diff_sample": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "kernel_name": "paged_attention_cuda_v2",
+      "seq_len": 7,
+      "seed": 1,
+      "passed": true,
+      "max_abs_diff": 0.0,
+      "reference_finite": true,
+      "cuda_finite": true,
+      "diff_finite": true,
+      "layout": {
+        "num_layers": 2,
+        "total_blocks": 16,
+        "block_size_tokens": 8,
+        "num_kv_heads": 2,
+        "head_dim": 32,
+        "dtype": "float16",
+        "device": "cuda",
+        "key_cache_shape": [
+          2,
+          16,
+          8,
+          2,
+          32
+        ],
+        "value_cache_shape": [
+          2,
+          16,
+          8,
+          2,
+          32
+        ],
+        "tokens_capacity": 128
+      },
+      "block_table": [
+        0
+      ],
+      "reference_output_shape": [
+        2,
+        32
+      ],
+      "cuda_output_shape": [
+        2,
+        32
+      ],
+      "cuda_output_sample": [
+        -0.06982421875,
+        -1.248046875,
+        0.09002685546875,
+        0.65380859375,
+        0.217529296875,
+        -0.43505859375,
+        -0.22705078125,
+        -0.089111328125
+      ],
+      "reference_output_sample": [
+        -0.06982421875,
+        -1.248046875,
+        0.09002685546875,
+        0.65380859375,
+        0.217529296875,
+        -0.43505859375,
+        -0.22705078125,
+        -0.089111328125
+      ],
+      "diff_sample": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "kernel_name": "paged_attention_cuda_v2",
+      "seq_len": 8,
+      "seed": 2,
+      "passed": true,
+      "max_abs_diff": 0.0,
+      "reference_finite": true,
+      "cuda_finite": true,
+      "diff_finite": true,
+      "layout": {
+        "num_layers": 2,
+        "total_blocks": 16,
+        "block_size_tokens": 8,
+        "num_kv_heads": 2,
+        "head_dim": 32,
+        "dtype": "float16",
+        "device": "cuda",
+        "key_cache_shape": [
+          2,
+          16,
+          8,
+          2,
+          32
+        ],
+        "value_cache_shape": [
+          2,
+          16,
+          8,
+          2,
+          32
+        ],
+        "tokens_capacity": 128
+      },
+      "block_table": [
+        0
+      ],
+      "reference_output_shape": [
+        2,
+        32
+      ],
+      "cuda_output_shape": [
+        2,
+        32
+      ],
+      "cuda_output_sample": [
+        -0.1805419921875,
+        0.6953125,
+        0.14306640625,
+        0.46875,
+        0.258544921875,
+        0.221923828125,
+        -0.0726318359375,
+        -0.7607421875
+      ],
+      "reference_output_sample": [
+        -0.1805419921875,
+        0.6953125,
+        0.14306640625,
+        0.46875,
+        0.258544921875,
+        0.221923828125,
+        -0.0726318359375,
+        -0.7607421875
+      ],
+      "diff_sample": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "kernel_name": "paged_attention_cuda_v2",
+      "seq_len": 9,
+      "seed": 3,
+      "passed": true,
+      "max_abs_diff": 0.0,
+      "reference_finite": true,
+      "cuda_finite": true,
+      "diff_finite": true,
+      "layout": {
+        "num_layers": 2,
+        "total_blocks": 16,
+        "block_size_tokens": 8,
+        "num_kv_heads": 2,
+        "head_dim": 32,
+        "dtype": "float16",
+        "device": "cuda",
+        "key_cache_shape": [
+          2,
+          16,
+          8,
+          2,
+          32
+        ],
+        "value_cache_shape": [
+          2,
+          16,
+          8,
+          2,
+          32
+        ],
+        "tokens_capacity": 128
+      },
+      "block_table": [
+        0,
+        1
+      ],
+      "reference_output_shape": [
+        2,
+        32
+      ],
+      "cuda_output_shape": [
+        2,
+        32
+      ],
+      "cuda_output_sample": [
+        0.62744140625,
+        -0.6728515625,
+        0.44384765625,
+        0.141845703125,
+        -0.0430908203125,
+        -0.6513671875,
+        0.4189453125,
+        0.5478515625
+      ],
+      "reference_output_sample": [
+        0.62744140625,
+        -0.6728515625,
+        0.44384765625,
+        0.141845703125,
+        -0.0430908203125,
+        -0.6513671875,
+        0.4189453125,
+        0.5478515625
+      ],
+      "diff_sample": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "kernel_name": "paged_attention_cuda_v2",
+      "seq_len": 19,
+      "seed": 4,
+      "passed": true,
+      "max_abs_diff": 0.0,
+      "reference_finite": true,
+      "cuda_finite": true,
+      "diff_finite": true,
+      "layout": {
+        "num_layers": 2,
+        "total_blocks": 16,
+        "block_size_tokens": 8,
+        "num_kv_heads": 2,
+        "head_dim": 32,
+        "dtype": "float16",
+        "device": "cuda",
+        "key_cache_shape": [
+          2,
+          16,
+          8,
+          2,
+          32
+        ],
+        "value_cache_shape": [
+          2,
+          16,
+          8,
+          2,
+          32
+        ],
+        "tokens_capacity": 128
+      },
+      "block_table": [
+        0,
+        1,
+        2
+      ],
+      "reference_output_shape": [
+        2,
+        32
+      ],
+      "cuda_output_shape": [
+        2,
+        32
+      ],
+      "cuda_output_sample": [
+        0.1138916015625,
+        -0.08953857421875,
+        0.092041015625,
+        0.169189453125,
+        0.10357666015625,
+        -0.28564453125,
+        -0.1551513671875,
+        0.054595947265625
+      ],
+      "reference_output_sample": [
+        0.1138916015625,
+        -0.08953857421875,
+        0.092041015625,
+        0.169189453125,
+        0.10357666015625,
+        -0.28564453125,
+        -0.1551513671875,
+        0.054595947265625
+      ],
+      "diff_sample": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ]
+}
