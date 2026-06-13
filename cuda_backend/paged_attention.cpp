@@ -88,8 +88,16 @@ torch::Tensor paged_attention_decode_batch(
 
     TORCH_CHECK(q.size(0) == block_tables.size(0), "batch size mismatch");
     TORCH_CHECK(q.size(0) == seq_lens.size(0), "batch size mismatch");
-    TORCH_CHECK(q.size(1) == key_cache.size(3), "num_heads mismatch");
+    
+    const auto num_query_heads = q.size(1);
+    const auto num_kv_heads = key_cache.size(3);
+
+    TORCH_CHECK(num_query_heads >= num_kv_heads, "num_query_heads must be >= num_kv_heads");
+    TORCH_CHECK(num_query_heads % num_kv_heads == 0, "num_query_heads must be divisible by num_kv_heads");
     TORCH_CHECK(q.size(2) == key_cache.size(4), "head_dim mismatch");
+
+    TORCH_CHECK(value_cache.size(3) == key_cache.size(3), "value_cache num_kv_heads must match key_cache num_kv_heads");
+    TORCH_CHECK(value_cache.size(4) == key_cache.size(4), "value_cache head_dim must match key_cache head_dim");
 
     return paged_attention_decode_batch_cuda(
         q.contiguous(),

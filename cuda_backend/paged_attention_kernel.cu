@@ -148,7 +148,7 @@ namespace{
     }
 
 
-    __global__ void paged_attention_decode_batch_kernel_v4(
+    __global__ void paged_attention_decode_batch_kernel_v5(
         const half* __restrict__ q,
         const half* __restrict__ key_cache,
         const half* __restrict__ value_cache,
@@ -161,16 +161,20 @@ namespace{
         int64_t num_layers,
         int64_t num_blocks,
         int64_t block_size,
-        int64_t num_heads,
+        int64_t num_query_heads,
+        int64_t num_kv_heads,
         int64_t head_dim
     ){
-        int head_id = blockIdx.x;
+        int query_head_id = blockIdx.x;
         int sequence_id = blockIdx.y;
         int tid = threadIdx.x;
 
-        if(sequence_id >= batch_size || head_id >= num_heads){
+        if(sequence_id >= batch_size || query_head_id >= num_query_heads){
             return;
         }
+
+        int64_t query_heads_per_kv_head = num_query_heads / num_kv_heads;
+        int64_t kv_head_id = query_head_id / query_heads_per_kv_head;
 
         int64_t seq_len = static_cast<int64_t>(seq_lens[sequence_id]);
 
@@ -196,8 +200,8 @@ namespace{
             float partial_score = 0.0f;
 
             for(int d = tid; d < head_dim; d += THREADS_PER_HEAD){
-                int64_t q_idx = ((sequence_id * num_heads + head_id) * head_dim) + d;
-                int64_t k_idx = (((layer_id * num_blocks + physical_block_id) * block_size + block_offset) * num_heads + head_id) * head_dim + d;
+                int64_t q_idx = ((sequence_id * num_query_heads + query_head_id) * head_dim) + d;
+                int64_t k_idx = (((layer_id * num_blocks + physical_block_id) * block_size + block_offset) * num_kv_heads + kv_head_id) * head_dim + d;
 
                 float q_val = __half2float(q[q_idx]);
                 float k_val = __half2float(key_cache[k_idx]);
@@ -236,7 +240,7 @@ namespace{
 
         if(!isfinite(max_score) || !isfinite(denom) || denom == 0.0f){
             for(int64_t d = tid; d < head_dim; d += THREADS_PER_HEAD){
-                int64_t out_idx = ((sequence_id * num_heads + head_id) * head_dim) + d;
+                int64_t out_idx = ((sequence_id * num_query_heads + query_head_id) * head_dim) + d;
                 output[out_idx] = __float2half(0.0f);
             }
             return;
@@ -254,13 +258,13 @@ namespace{
 
                 float prob = expf(scores[token_pos] - max_score) / denom;
 
-                int64_t v_idx = (((layer_id * num_blocks + physical_block_id) * block_size + block_offset) * num_heads + head_id) * head_dim + output_dim;
+                int64_t v_idx = (((layer_id * num_blocks + physical_block_id) * block_size + block_offset) * num_kv_heads + kv_head_id) * head_dim + output_dim;
                 float v_val = __half2float(value_cache[v_idx]);
 
                 acc += prob * v_val;
 
             }
-            int64_t out_idx = ((sequence_id * num_heads + head_id) * head_dim) + output_dim;
+            int64_t out_idx = ((sequence_id * num_query_heads + query_head_id) * head_dim) + output_dim;
             output[out_idx] = __float2half(acc);
         }
     }
@@ -314,12 +318,13 @@ torch::Tensor paged_attention_decode_batch_cuda(
     int64_t layer_id
 ) {
     const auto batch_size = q.size(0);
-    const auto num_heads = q.size(1);
+    const auto num_query_heads = q.size(1);
     const auto head_dim = q.size(2);
 
     const auto num_layers = key_cache.size(0);
     const auto num_blocks = key_cache.size(1);
     const auto block_size = key_cache.size(2);
+    const auto num_kv_heads = key_cache.size(3);
 
     const auto max_blocks_per_seq = block_tables.size(1);
 
@@ -328,10 +333,10 @@ torch::Tensor paged_attention_decode_batch_cuda(
 
     auto output = torch::empty_like(q);
 
-    dim3 grid(num_heads, batch_size);
+    dim3 grid(num_query_heads, batch_size);
     dim3 block(THREADS_PER_HEAD);
 
-    paged_attention_decode_batch_kernel_v4<<<grid, block>>>(
+    paged_attention_decode_batch_kernel_v5<<<grid, block>>>(
         reinterpret_cast<const half*>(q.data_ptr<at::Half>()),
         reinterpret_cast<const half*>(key_cache.data_ptr<at::Half>()),
         reinterpret_cast<const half*>(value_cache.data_ptr<at::Half>()),
@@ -344,14 +349,15 @@ torch::Tensor paged_attention_decode_batch_cuda(
         num_layers,
         num_blocks,
         block_size,
-        num_heads,
+        num_query_heads,
+        num_kv_heads,
         head_dim
     );
 
     cudaError_t err = cudaGetLastError();
     TORCH_CHECK(
         err == cudaSuccess,
-        "paged_attention_decode_batch_kernel_v4 failed: ",
+        "paged_attention_decode_batch_kernel_v5 failed: ",
         cudaGetErrorString(err)
     );
 

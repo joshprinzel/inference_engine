@@ -17,7 +17,7 @@ from paged_attention_reference import paged_attention_decode_reference
 import paged_attention_cuda
 
 
-KERNEL_NAME = "paged_attention_cuda_v4_batched"
+KERNEL_NAME = "paged_attention_cuda_v5_batched"
 SEQ_LEN_CASES = [
     [1],
     [7, 8],
