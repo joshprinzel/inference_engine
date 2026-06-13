@@ -148,7 +148,7 @@ namespace{
     }
 
 
-    __global__ void paged_attention_decode_batch_kernel_v5(
+    __global__ void paged_attention_decode_batch_kernel_v6a(
         const half* __restrict__ q,
         const half* __restrict__ key_cache,
         const half* __restrict__ value_cache,
@@ -226,17 +226,18 @@ namespace{
         __syncthreads();
 
 
-        float denom = 0.0f;
-        if(tid == 0){
-            for(int64_t token_pos = 0; token_pos < seq_len; token_pos++){
-                denom += expf(scores[token_pos] - max_score);
-            }
+        float denom_partial = 0.0f;
+        for(int64_t token_pos = tid; token_pos < seq_len; token_pos += THREADS_PER_HEAD){
+            denom_partial += expf(scores[token_pos] - max_score);
+        }
 
+        float denom = block_reduce_sum(denom_partial);
+        if(tid == 0){
             shared_denom = denom;
         }
         __syncthreads();
         denom = shared_denom;
-        __syncthreads();
+        
 
         if(!isfinite(max_score) || !isfinite(denom) || denom == 0.0f){
             for(int64_t d = tid; d < head_dim; d += THREADS_PER_HEAD){
@@ -336,7 +337,7 @@ torch::Tensor paged_attention_decode_batch_cuda(
     dim3 grid(num_query_heads, batch_size);
     dim3 block(THREADS_PER_HEAD);
 
-    paged_attention_decode_batch_kernel_v5<<<grid, block>>>(
+    paged_attention_decode_batch_kernel_v6a<<<grid, block>>>(
         reinterpret_cast<const half*>(q.data_ptr<at::Half>()),
         reinterpret_cast<const half*>(key_cache.data_ptr<at::Half>()),
         reinterpret_cast<const half*>(value_cache.data_ptr<at::Half>()),

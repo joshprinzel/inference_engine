@@ -17,7 +17,7 @@ from paged_attention_reference import paged_attention_decode_reference
 import paged_attention_cuda
 
 
-KERNEL_NAME = "paged_attention_cuda_v5_gqa_mqa"
+KERNEL_NAME = "paged_attention_cuda_6a_gqa_mqa"
 BENCH_NAME = f"{KERNEL_NAME}_bench"
 
 ATTENTION_CONFIGS = [

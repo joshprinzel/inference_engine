@@ -1,4 +1,0 @@
-# ninja log v5
-1	22392	1781313104743867000	/mnt/c/Users/joshp_ya/VSCodeProjects/Personal/portfolio/llm-inference-systems-lab/inference-server/cuda_backend/build/temp.linux-x86_64-cpython-313/paged_attention.o	2f6e3fe7bcf6b3d1
-11	19354	1781313349981979900	/mnt/c/Users/joshp_ya/VSCodeProjects/Personal/portfolio/llm-inference-systems-lab/inference-server/cuda_backend/build/temp.linux-x86_64-cpython-313/paged_attention.o	2f6e3fe7bcf6b3d1
-11	61704	1781313393319299700	/mnt/c/Users/joshp_ya/VSCodeProjects/Personal/portfolio/llm-inference-systems-lab/inference-server/cuda_backend/build/temp.linux-x86_64-cpython-313/paged_attention_kernel.o	36d7ac799e2fed5
