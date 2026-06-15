@@ -27,6 +27,29 @@ namespace{
         return shared[0];
     }
 
+    __device__ float warp_reduce_sum(float value){
+        for(int offset = 16; offset > 0; offset >>= 1){
+            value += __shfl_down_sync(0xffffffff, value, offset);
+        }
+        return value;
+    }
+
+    __device__ float block_reduce_max(float value){
+        __shared__ float shared[THREADS_PER_HEAD];
+
+        int tid = threadIdx.x;
+        shared[tid] = value;
+        __syncthreads();
+
+        for(int stride = THREADS_PER_HEAD / 2; stride > 0; stride >>= 1){
+            if(tid < stride){
+                shared[tid] = fmaxf(shared[tid], shared[tid + stride]);
+            }
+            __syncthreads();
+        }
+        return shared[0];
+    }
+
     __global__ void paged_attention_decode_kernel_v3(
         const half* __restrict__ q,
         const half* __restrict__ key_cache,
@@ -97,7 +120,6 @@ namespace{
             }
             __syncthreads();
             max_score = shared_max;
-            __syncthreads();
         }
 
         //Pass 2: 
@@ -148,7 +170,7 @@ namespace{
     }
 
 
-    __global__ void paged_attention_decode_batch_kernel_v6a(
+    __global__ void paged_attention_decode_batch_kernel_v7(
         const half* __restrict__ q,
         const half* __restrict__ key_cache,
         const half* __restrict__ value_cache,
@@ -188,42 +210,80 @@ namespace{
 
         float scale = rsqrtf(static_cast<float>(head_dim));
 
-        float max_score = -INFINITY;
+        constexpr int WARP_SIZE = 32;
+        constexpr int WARPS_PER_BLOCK = THREADS_PER_HEAD / WARP_SIZE;
 
-        for(int64_t token_pos = 0; token_pos < seq_len; token_pos++){
-            int64_t logical_block_id = token_pos / block_size;
-            int64_t block_offset = token_pos % block_size;
+        int warp_id = tid / WARP_SIZE;
+        int lane_id = tid % WARP_SIZE;
 
-            int64_t block_table_idx = sequence_id * max_blocks_per_seq + logical_block_id;
-            int64_t physical_block_id = static_cast<int64_t>(block_tables[block_table_idx]);
+        /*
 
-            float partial_score = 0.0f;
+            Pass 1a:
+            Compute QK scores using warp-level reductions.
 
-            for(int d = tid; d < head_dim; d += THREADS_PER_HEAD){
-                int64_t q_idx = ((sequence_id * num_query_heads + query_head_id) * head_dim) + d;
-                int64_t k_idx = (((layer_id * num_blocks + physical_block_id) * block_size + block_offset) * num_kv_heads + kv_head_id) * head_dim + d;
+            Each CTA still owns one sequence/query-head pair.
+            But now each warp computes one token score at a time.
 
-                float q_val = __half2float(q[q_idx]);
-                float k_val = __half2float(key_cache[k_idx]);
+                warp 0 -> token_base + 0
+                warp 1 -> token_base + 1
+                warp 2 -> token_base + 2
+                warp 3 -> token_base + 3
+            
+            For head_dim=128, each lane handles:
+                lane_id, lane_id + 32, lane_id + 64, lane_id + 96
+            
+            This removes the block-wide reduction per token structure from v6a
+        
+        */
 
-                partial_score += q_val * k_val;
-            }
-            float score = block_reduce_sum(partial_score) * scale;
+        for(int64_t token_base = 0; token_base < seq_len; token_base += WARPS_PER_BLOCK){
+            int64_t token_pos = token_base + warp_id;
 
-            if(tid == 0){
-                scores[token_pos] = score;
-                if(score > max_score){
-                    max_score = score;
+            if(token_pos < seq_len){
+                int64_t logical_block_id = token_pos / block_size;
+                int64_t block_offset = token_pos % block_size;
+
+                int64_t block_table_idx = sequence_id * max_blocks_per_seq + logical_block_id;
+                int64_t physical_block_id = static_cast<int64_t>(block_tables[block_table_idx]);
+
+                float partial_score = 0.0f;
+                for(int64_t d = lane_id; d < head_dim; d += WARP_SIZE){
+                    int64_t q_idx = ((sequence_id * num_query_heads + query_head_id) * head_dim) + d;
+
+                    int64_t k_idx = (((layer_id * num_blocks + physical_block_id) * block_size + block_offset) * num_kv_heads + kv_head_id) * head_dim + d;
+
+                    float q_val = __half2float(q[q_idx]);
+                    float k_val = __half2float(key_cache[k_idx]);
+
+                    partial_score += q_val * k_val;
+                }
+                float score = warp_reduce_sum(partial_score) * scale;
+                if(lane_id == 0){
+                    scores[token_pos] = score;
                 }
             }
-            __syncthreads();
         }
+        __syncthreads();
+
+        /*
+            Pass 1b:
+            Compute max over materialized scores.
+
+            This adds one block-wide max reduction over seq-len, but removes the much
+            more expensive block-wide reduction inside every token's QK computation.
+        */
+
+        float max_partial = -INFINITY;
+        for(int64_t token_pos = tid; token_pos < seq_len; token_pos += THREADS_PER_HEAD){
+            max_partial = fmaxf(max_partial, scores[token_pos]);
+        }
+
+        float max_score = block_reduce_max(max_partial);
         if(tid == 0){
             shared_max = max_score;
         }
         __syncthreads();
         max_score = shared_max;
-        __syncthreads();
 
 
         float denom_partial = 0.0f;
@@ -337,7 +397,7 @@ torch::Tensor paged_attention_decode_batch_cuda(
     dim3 grid(num_query_heads, batch_size);
     dim3 block(THREADS_PER_HEAD);
 
-    paged_attention_decode_batch_kernel_v6a<<<grid, block>>>(
+    paged_attention_decode_batch_kernel_v7<<<grid, block>>>(
         reinterpret_cast<const half*>(q.data_ptr<at::Half>()),
         reinterpret_cast<const half*>(key_cache.data_ptr<at::Half>()),
         reinterpret_cast<const half*>(value_cache.data_ptr<at::Half>()),

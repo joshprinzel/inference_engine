@@ -262,7 +262,7 @@ def profile_loop(
     torch.cuda.nvtx.range_pop()
 
     print("profile loop...")
-    torch.cuda.nvtx.range_push("profiled_paged_attention_v6a")
+    torch.cuda.nvtx.range_push("profiled_paged_attention_v7")
     for _ in range(profile_iters):
         run_cuda(case)
     torch.cuda.synchronize()
@@ -271,7 +271,7 @@ def profile_loop(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Profile CUDA paged attention v6a GQA/MQA kernel."
+        description="Profile CUDA paged attention v7 GQA/MQA kernel."
     )
 
     parser.add_argument(
