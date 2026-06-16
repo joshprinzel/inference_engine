@@ -1,3 +1,10 @@
+"""
+Legacy standalone synthetic decode harness.
+
+Current engine-agnostic CUDA path:
+    EngineScheduler -> SyntheticCudaDecodeEngine -> DecodeBatch -> AttentionBackend
+"""
+
 from __future__ import annotations
 
 import time

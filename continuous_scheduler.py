@@ -1,3 +1,12 @@
+"""
+Legacy continuous scheduler retained for historical comparison.
+
+This was the first ORCA-style scheduler implementation, but it was coupled
+directly to ModelRunner.
+
+Current runtime path:
+    server.py -> EngineScheduler -> DecodeEngine
+"""
 import time
 from queue import Empty
 from threading import Lock, Thread

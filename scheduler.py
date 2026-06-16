@@ -1,3 +1,13 @@
+
+
+"""
+Legacy static/batch scheduler retained for comparison.
+
+Current runtime path:
+    server.py -> EngineScheduler -> DecodeEngine
+
+Do not use this scheduler for new runtime features.
+"""
 from threading import Thread, Lock
 import time
 from queue import Empty
