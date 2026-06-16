@@ -61,9 +61,13 @@ class ReferencePagedAttentionBackend(AttentionBackend):
         )
 
 
-class CudaPagedAttentionBackend(AttentionBackend):
+class CudaPagedAttentionBackend:
     def __init__(self) -> None:
+        import sys
+        from pathlib import Path
+
         cuda_backend_dir = Path(__file__).resolve().parent / "cuda_backend"
+
         if str(cuda_backend_dir) not in sys.path:
             sys.path.insert(0, str(cuda_backend_dir))
 

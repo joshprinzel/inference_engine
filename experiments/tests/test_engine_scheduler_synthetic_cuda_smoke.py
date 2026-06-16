@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -72,17 +72,33 @@ def main() -> None:
     print(snapshot)
 
     assert len(scheduler.finished) == max_slots
+
+    for request_state in scheduler.finished:
+        print(
+            {
+                "request_id": request_state.request_id,
+                "status": request_state.status,
+                "generated_tokens": request_state.generated_tokens,
+                "error": repr(request_state.error),
+            }
+        )
+
+    assert all(
+        request_state.status == "finished"
+        for request_state in scheduler.finished
+    )
+
     assert scheduler.tokens_generated == max_slots * max_new_tokens
     assert kv_block_manager.used_block_count() == 0
     assert scheduler.decode_batches_built == max_new_tokens
-    assert scheduler.last_decode_batch_snapshot is not None if hasattr(scheduler, "last_decode_batch") else True
+    assert scheduler.last_decode_batch_snapshot is not None
 
     for request_state in scheduler.finished:
-        assert request_state.status == "finished"
         assert request_state.generated_tokens == max_new_tokens
         assert request_state.generated_text == "<tok1><tok2><tok3><tok4>"
 
     print("passed")
+
 
 
 if __name__ == "__main__":
