@@ -13,10 +13,10 @@ results/scheduler_attention_backend_harness.csv
 | Backend | `reference` |
 | Decode steps | 8 |
 | Total tokens emitted | 32 |
-| Backend median latency | 5.336307 ms |
-| Backend min latency | 4.535797 ms |
-| Backend p95 latency | 88.269382 ms |
-| Backend max latency | 132.116095 ms |
+| Backend median latency | 4.960296 ms |
+| Backend min latency | 4.364768 ms |
+| Backend p95 latency | 118.153554 ms |
+| Backend max latency | 178.472922 ms |
 | Average active batch size | 4.00 |
 | Max active batch size | 4 |
 | Initial KV utilization | 1.0000 |
@@ -47,12 +47,12 @@ Last 10 decode steps:
 
 ```text
  decode_step  active_batch_size   backend  backend_ms  kv_used_blocks  kv_free_blocks  kv_utilization  total_tokens_emitted
-           0                  4 reference  132.116095              68               0             1.0                     4
-           1                  4 reference    5.253900              68               0             1.0                     8
-           2                  4 reference    5.946583              68               0             1.0                    12
-           3                  4 reference    5.296791              68               0             1.0                    16
-           4                  4 reference    5.073351              68               0             1.0                    20
-           5                  4 reference    6.839771              68               0             1.0                    24
-           6                  4 reference    5.375823              68               0             1.0                    28
-           7                  4 reference    4.535797               0              68             0.0                    32
+           0                  4 reference  178.472922              68               0             1.0                     4
+           1                  4 reference    4.668805              68               0             1.0                     8
+           2                  4 reference    4.364768              68               0             1.0                    12
+           3                  4 reference    6.131871              68               0             1.0                    16
+           4                  4 reference    5.056051              68               0             1.0                    20
+           5                  4 reference    4.581187              68               0             1.0                    24
+           6                  4 reference    5.838669              68               0             1.0                    28
+           7                  4 reference    4.864541               0              68             0.0                    32
 ```
