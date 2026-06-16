@@ -74,9 +74,10 @@ def build_decode_batch(
             request_id = str(request_state.request_id)
             block_table = kv_block_manager.get_block_tables(request_id)
 
-            # The next token will be written at the current sequence length.
+            # Decode attention can only attend to KV tokens that already exist.
+            # The next generated token's KV will be written at this position after the step.
             position = request_state.prompt_tokens + request_state.generated_tokens
-            seq_len = position + 1
+            seq_len = position
 
             request_ids.append(request_id)
             input_token_ids.append(int(request_state.next_token.item()))

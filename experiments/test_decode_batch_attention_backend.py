@@ -186,7 +186,7 @@ def main() -> None:
         # So to get desired seq_len, set position = seq_len - 1.
         request_state = make_request_state(
             request_id=request_id,
-            prompt_tokens=args.seq_len - 1,
+            prompt_tokens=args.seq_len,
             generated_tokens=0,
             next_token_id=100 + i,
         )
