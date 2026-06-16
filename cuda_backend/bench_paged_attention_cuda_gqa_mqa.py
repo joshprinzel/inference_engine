@@ -1,8 +1,11 @@
+import argparse
 import json
+import math
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -17,7 +20,7 @@ from paged_attention_reference import paged_attention_decode_reference
 import paged_attention_cuda
 
 
-KERNEL_NAME = "paged_attention_cuda_v7_gqa_mqa"
+KERNEL_NAME = "paged_attention_cuda_v9a_gqa_mqa"
 BENCH_NAME = f"{KERNEL_NAME}_bench"
 
 ATTENTION_CONFIGS = [
@@ -41,18 +44,121 @@ ATTENTION_CONFIGS = [
     },
 ]
 
-BATCH_SIZES = [1, 4, 8, 16, 32]
-SEQ_LENS = [128, 256, 512]
-
 NUM_LAYERS = 2
 TOTAL_BLOCKS = 32768
 BLOCK_SIZE_TOKENS = 8
 DTYPE = "float16"
 DEVICE = "cuda"
-
-DEFAULT_WARMUP_ITERS = 25
-TRIALS = 5
 MAX_ALLOWED_DIFF = 1e-2
+
+
+@dataclass(frozen=True)
+class BenchProfile:
+    name: str
+    batch_sizes: list[int]
+    seq_lens: list[int]
+    warmup_iters: int
+    trials: int
+    time_reference: bool
+    bench_iter_scale: float = 1.0
+
+
+BENCH_PROFILES = {
+    # Fast iteration profile. Keeps attention-mode coverage and representative
+    # latency/throughput points while avoiding redundant middle grid points.
+    "quick": BenchProfile(
+        name="quick",
+        batch_sizes=[1, 8, 32],
+        seq_lens=[128, 512],
+        warmup_iters=10,
+        trials=3,
+        time_reference=False,
+        bench_iter_scale=1.0,
+    ),
+    # Original exhaustive grid with full reference timing.
+    "full": BenchProfile(
+        name="full",
+        batch_sizes=[1, 4, 8, 16, 32],
+        seq_lens=[128, 256, 512],
+        warmup_iters=25,
+        trials=5,
+        time_reference=True,
+        bench_iter_scale=1.0,
+    ),
+    # Useful when you want correctness plus a very quick smoke-test timing pass.
+    "smoke": BenchProfile(
+        name="smoke",
+        batch_sizes=[1, 32],
+        seq_lens=[128, 512],
+        warmup_iters=5,
+        trials=2,
+        time_reference=False,
+        bench_iter_scale=0.5,
+    ),
+}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Benchmark batched CUDA paged attention decode across MHA/GQA/MQA."
+    )
+    parser.add_argument(
+        "--profile",
+        choices=sorted(BENCH_PROFILES),
+        default="quick",
+        help="Benchmark profile. Default: quick.",
+    )
+    parser.add_argument(
+        "--time-reference",
+        action="store_true",
+        help="Also benchmark the Python reference implementation.",
+    )
+    parser.add_argument(
+        "--skip-reference-timing",
+        action="store_true",
+        help="Do not benchmark the Python reference implementation, even for full profile.",
+    )
+    parser.add_argument(
+        "--warmup-iters",
+        type=int,
+        default=None,
+        help="Override warmup iterations per timing trial.",
+    )
+    parser.add_argument(
+        "--trials",
+        type=int,
+        default=None,
+        help="Override timing trials per case.",
+    )
+    parser.add_argument(
+        "--output-suffix",
+        default=None,
+        help="Suffix for report files. Default: profile name.",
+    )
+    return parser.parse_args()
+
+
+def resolve_profile(args: argparse.Namespace) -> BenchProfile:
+    base = BENCH_PROFILES[args.profile]
+
+    if args.time_reference and args.skip_reference_timing:
+        raise ValueError("Use either --time-reference or --skip-reference-timing, not both")
+
+    time_reference = base.time_reference
+    if args.time_reference:
+        time_reference = True
+    if args.skip_reference_timing:
+        time_reference = False
+
+    return BenchProfile(
+        name=base.name,
+        batch_sizes=base.batch_sizes,
+        seq_lens=base.seq_lens,
+        warmup_iters=args.warmup_iters if args.warmup_iters is not None else base.warmup_iters,
+        trials=args.trials if args.trials is not None else base.trials,
+        time_reference=time_reference,
+        bench_iter_scale=base.bench_iter_scale,
+    )
 
 
 def bench_iters_for_case(
@@ -61,23 +167,29 @@ def bench_iters_for_case(
     num_query_heads: int,
     num_kv_heads: int,
     head_dim: int,
+    scale: float = 1.0,
 ) -> int:
-    # This is just a rough iteration budget. Query-head work dominates output size,
+    # This is a rough iteration budget. Query-head work dominates output size;
     # KV-head count affects cache footprint and K/V indexing.
     work = batch_size * seq_len * num_query_heads * head_dim
 
     if work <= 4 * 128 * 16 * 128:
-        return 300
+        base_iters = 300
+    elif work <= 16 * 256 * 16 * 128:
+        base_iters = 100
+    else:
+        base_iters = 50
 
-    if work <= 16 * 256 * 16 * 128:
-        return 100
-
-    return 50
+    return max(1, int(round(base_iters * scale)))
 
 
 def summarize_measurements(values: list[float]) -> dict[str, float]:
     if not values:
-        raise ValueError("values must be non-empty")
+        return {
+            "min": math.nan,
+            "median": math.nan,
+            "max": math.nan,
+        }
 
     sorted_values = sorted(values)
     n = len(sorted_values)
@@ -92,6 +204,31 @@ def summarize_measurements(values: list[float]) -> dict[str, float]:
         "median": median,
         "max": sorted_values[-1],
     }
+
+
+def empty_timing() -> dict[str, Any]:
+    return {
+        "trials": [],
+        "min": math.nan,
+        "median": math.nan,
+        "max": math.nan,
+    }
+
+
+def format_float(value: float, precision: int = 6) -> str:
+    if math.isnan(value):
+        return "n/a"
+    if math.isinf(value):
+        return "inf"
+    return f"{value:.{precision}f}"
+
+
+def format_speedup(value: float) -> str:
+    if math.isnan(value):
+        return "n/a"
+    if math.isinf(value):
+        return "inf"
+    return f"{value:.2f}x"
 
 
 def fill_request_kv(
@@ -260,7 +397,7 @@ def reference_batch_decode(
 
 
 def benchmark_cuda_events(
-    fn,
+    fn: Callable[[], torch.Tensor],
     warmup_iters: int,
     bench_iters: int,
 ) -> float:
@@ -285,7 +422,7 @@ def benchmark_cuda_events(
 
 
 def benchmark_trials(
-    fn,
+    fn: Callable[[], torch.Tensor],
     warmup_iters: int,
     bench_iters: int,
     trials: int,
@@ -318,6 +455,7 @@ def run_one_case(
     batch_size: int,
     seq_len: int,
     seed: int,
+    profile: BenchProfile,
 ) -> dict[str, Any]:
     case = make_case(
         attention_name=attention_name,
@@ -338,13 +476,14 @@ def run_one_case(
     seq_lens_tensor: torch.Tensor = case["seq_lens_tensor"]
     q: torch.Tensor = case["q"]
 
-    warmup_iters = DEFAULT_WARMUP_ITERS
+    warmup_iters = profile.warmup_iters
     bench_iters = bench_iters_for_case(
         batch_size=batch_size,
         seq_len=seq_len,
         num_query_heads=num_query_heads,
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
+        scale=profile.bench_iter_scale,
     )
 
     def run_reference() -> torch.Tensor:
@@ -366,6 +505,7 @@ def run_one_case(
             layer_id,
         )
 
+    # Always run the reference once for correctness, even in quick/smoke modes.
     reference_output = run_reference()
     cuda_output = run_cuda()
 
@@ -383,24 +523,30 @@ def run_one_case(
         and max_abs_diff < MAX_ALLOWED_DIFF
     )
 
-    reference_timing = benchmark_trials(
-        fn=run_reference,
-        warmup_iters=warmup_iters,
-        bench_iters=bench_iters,
-        trials=TRIALS,
-    )
+    if profile.time_reference:
+        reference_timing = benchmark_trials(
+            fn=run_reference,
+            warmup_iters=warmup_iters,
+            bench_iters=bench_iters,
+            trials=profile.trials,
+        )
+    else:
+        reference_timing = empty_timing()
 
     cuda_timing = benchmark_trials(
         fn=run_cuda,
         warmup_iters=warmup_iters,
         bench_iters=bench_iters,
-        trials=TRIALS,
+        trials=profile.trials,
     )
 
     reference_ms = reference_timing["median"]
     cuda_ms = cuda_timing["median"]
 
-    speedup_vs_reference = reference_ms / cuda_ms if cuda_ms > 0 else float("inf")
+    if profile.time_reference and cuda_ms > 0:
+        speedup_vs_reference = reference_ms / cuda_ms
+    else:
+        speedup_vs_reference = math.nan
 
     num_ctas = batch_size * num_query_heads
     attended_tokens = batch_size * seq_len
@@ -418,6 +564,8 @@ def run_one_case(
 
     return {
         "kernel_name": KERNEL_NAME,
+        "profile": profile.name,
+        "time_reference": profile.time_reference,
         "attention_name": attention_name,
         "seed": seed,
         "batch_size": batch_size,
@@ -452,42 +600,48 @@ def run_one_case(
         "layout": layout.snapshot(),
         "warmup_iters": warmup_iters,
         "bench_iters": bench_iters,
-        "trials": TRIALS,
+        "trials": profile.trials,
     }
 
 
 def write_json_report(
     results: list[dict[str, Any]],
     output_path: Path,
+    profile: BenchProfile,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     payload = {
         "bench_name": BENCH_NAME,
         "kernel_name": KERNEL_NAME,
+        "profile": profile.name,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "loaded_extension": str(paged_attention_cuda.__file__),
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         "device_name": torch.cuda.get_device_name(0),
         "attention_configs": ATTENTION_CONFIGS,
-        "batch_sizes": BATCH_SIZES,
-        "seq_lens": SEQ_LENS,
+        "batch_sizes": profile.batch_sizes,
+        "seq_lens": profile.seq_lens,
         "block_size_tokens": BLOCK_SIZE_TOKENS,
         "total_blocks": TOTAL_BLOCKS,
         "dtype": DTYPE,
-        "default_warmup_iters": DEFAULT_WARMUP_ITERS,
-        "trials": TRIALS,
+        "warmup_iters": profile.warmup_iters,
+        "trials": profile.trials,
+        "time_reference": profile.time_reference,
+        "bench_iter_scale": profile.bench_iter_scale,
+        "num_cases": len(results),
         "all_passed": all(result["passed"] for result in results),
         "results": results,
     }
 
-    output_path.write_text(json.dumps(payload, indent=2))
+    output_path.write_text(json.dumps(payload, indent=2, allow_nan=True))
 
 
 def write_markdown_report(
     results: list[dict[str, Any]],
     output_path: Path,
+    profile: BenchProfile,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -516,14 +670,17 @@ def write_markdown_report(
     lines.append("")
     lines.append("## Benchmark Config")
     lines.append("")
+    lines.append(f"- Profile: `{profile.name}`")
     lines.append(f"- Attention configs: `{ATTENTION_CONFIGS}`")
-    lines.append(f"- Batch sizes: `{BATCH_SIZES}`")
-    lines.append(f"- Sequence lengths: `{SEQ_LENS}`")
+    lines.append(f"- Batch sizes: `{profile.batch_sizes}`")
+    lines.append(f"- Sequence lengths: `{profile.seq_lens}`")
+    lines.append(f"- Number of cases: `{len(results)}`")
     lines.append(f"- Block size tokens: `{BLOCK_SIZE_TOKENS}`")
     lines.append(f"- Total blocks: `{TOTAL_BLOCKS}`")
     lines.append(f"- Dtype: `{DTYPE}`")
-    lines.append(f"- Default warmup iterations: `{DEFAULT_WARMUP_ITERS}`")
-    lines.append(f"- Trials per case: `{TRIALS}`")
+    lines.append(f"- Warmup iterations: `{profile.warmup_iters}`")
+    lines.append(f"- Trials per case: `{profile.trials}`")
+    lines.append(f"- Reference timing enabled: `{profile.time_reference}`")
     lines.append("")
     lines.append("## Results")
     lines.append("")
@@ -545,15 +702,15 @@ def write_markdown_report(
             f"| {result['num_ctas']} "
             f"| {result['num_blocks_per_request']} "
             f"| {result['max_abs_diff']:.8f} "
-            f"| {result['reference_ms_median']:.6f} "
-            f"| {result['cuda_ms_median']:.6f} "
-            f"| {result['cuda_ms_min']:.6f} "
-            f"| {result['cuda_ms_max']:.6f} "
-            f"| {result['speedup_vs_reference']:.2f}x "
-            f"| {result['requests_per_ms']:.2f} "
-            f"| {result['attended_tokens_per_ms']:.2f} "
-            f"| {result['query_attention_elements_per_ms']:.2f} "
-            f"| {result['kv_cache_elements_per_ms']:.2f} "
+            f"| {format_float(result['reference_ms_median'])} "
+            f"| {format_float(result['cuda_ms_median'])} "
+            f"| {format_float(result['cuda_ms_min'])} "
+            f"| {format_float(result['cuda_ms_max'])} "
+            f"| {format_speedup(result['speedup_vs_reference'])} "
+            f"| {format_float(result['requests_per_ms'], 2)} "
+            f"| {format_float(result['attended_tokens_per_ms'], 2)} "
+            f"| {format_float(result['query_attention_elements_per_ms'], 2)} "
+            f"| {format_float(result['kv_cache_elements_per_ms'], 2)} "
             f"| {result['bench_iters']} "
             f"| {result['passed']} |"
         )
@@ -572,6 +729,11 @@ def write_markdown_report(
         "Each row reports the median of multiple CUDA-event timing trials. "
         "The minimum and maximum CUDA timings are included to expose benchmark variance."
     )
+    if not profile.time_reference:
+        lines.append("")
+        lines.append(
+            "Reference timing was skipped for this profile. The reference implementation was still run once per case for correctness."
+        )
     lines.append("")
     lines.append("## Interpretation")
     lines.append("")
@@ -592,9 +754,10 @@ def write_markdown_report(
     output_path.write_text("\n".join(lines))
 
 
-def print_terminal_summary(results: list[dict[str, Any]]) -> None:
+def print_terminal_summary(results: list[dict[str, Any]], profile: BenchProfile) -> None:
     print(BENCH_NAME)
     print("---")
+    print("profile:", profile.name)
     print("loaded extension:", paged_attention_cuda.__file__)
     print(
         "mode | batch | seq_len | q_heads | kv_heads | q/kv | CTAs | blocks/req | max_abs_diff | ref_med_ms | cuda_med_ms | cuda_min_ms | cuda_max_ms | speedup | req/ms | attended_tok/ms | q_elems/ms | kv_elems/ms | iters | passed"
@@ -614,15 +777,15 @@ def print_terminal_summary(results: list[dict[str, Any]]) -> None:
             f"{result['num_ctas']} | "
             f"{result['num_blocks_per_request']} | "
             f"{result['max_abs_diff']:.8f} | "
-            f"{result['reference_ms_median']:.6f} | "
-            f"{result['cuda_ms_median']:.6f} | "
-            f"{result['cuda_ms_min']:.6f} | "
-            f"{result['cuda_ms_max']:.6f} | "
-            f"{result['speedup_vs_reference']:.2f}x | "
-            f"{result['requests_per_ms']:.2f} | "
-            f"{result['attended_tokens_per_ms']:.2f} | "
-            f"{result['query_attention_elements_per_ms']:.2f} | "
-            f"{result['kv_cache_elements_per_ms']:.2f} | "
+            f"{format_float(result['reference_ms_median'])} | "
+            f"{format_float(result['cuda_ms_median'])} | "
+            f"{format_float(result['cuda_ms_min'])} | "
+            f"{format_float(result['cuda_ms_max'])} | "
+            f"{format_speedup(result['speedup_vs_reference'])} | "
+            f"{format_float(result['requests_per_ms'], 2)} | "
+            f"{format_float(result['attended_tokens_per_ms'], 2)} | "
+            f"{format_float(result['query_attention_elements_per_ms'], 2)} | "
+            f"{format_float(result['kv_cache_elements_per_ms'], 2)} | "
             f"{result['bench_iters']} | "
             f"{result['passed']}"
         )
@@ -631,7 +794,25 @@ def print_terminal_summary(results: list[dict[str, Any]]) -> None:
     print("all_passed:", all(result["passed"] for result in results))
 
 
+def report_paths(profile: BenchProfile, output_suffix: str | None) -> tuple[Path, Path]:
+    suffix = output_suffix if output_suffix is not None else profile.name
+    filename = f"{BENCH_NAME}_{suffix}"
+
+    results_json_path = Path("results") / f"{filename}.json"
+    markdown_path = (
+        PROJECT_ROOT
+        / "docs"
+        / "kernel_iterations"
+        / f"{filename}.md"
+    )
+
+    return results_json_path, markdown_path
+
+
 def main() -> None:
+    args = parse_args()
+    profile = resolve_profile(args)
+
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for this benchmark")
 
@@ -639,8 +820,8 @@ def main() -> None:
     case_index = 0
 
     for attention_config in ATTENTION_CONFIGS:
-        for seq_len in SEQ_LENS:
-            for batch_size in BATCH_SIZES:
+        for seq_len in profile.seq_lens:
+            for batch_size in profile.batch_sizes:
                 result = run_one_case(
                     attention_name=attention_config["name"],
                     num_query_heads=attention_config["num_query_heads"],
@@ -649,29 +830,29 @@ def main() -> None:
                     batch_size=batch_size,
                     seq_len=seq_len,
                     seed=case_index,
+                    profile=profile,
                 )
 
                 results.append(result)
                 case_index += 1
 
-    print_terminal_summary(results)
+    print_terminal_summary(results, profile=profile)
 
-    results_json_path = Path("results") / f"{BENCH_NAME}.json"
-    markdown_path = (
-        PROJECT_ROOT
-        / "docs"
-        / "kernel_iterations"
-        / f"{BENCH_NAME}.md"
+    results_json_path, markdown_path = report_paths(
+        profile=profile,
+        output_suffix=args.output_suffix,
     )
 
     write_json_report(
         results=results,
         output_path=results_json_path,
+        profile=profile,
     )
 
     write_markdown_report(
         results=results,
         output_path=markdown_path,
+        profile=profile,
     )
 
     print()

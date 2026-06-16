@@ -170,7 +170,7 @@ namespace{
     }
 
 
-    __global__ void paged_attention_decode_batch_kernel_v7(
+    __global__ void paged_attention_decode_batch_kernel_v9a(
         const half* __restrict__ q,
         const half* __restrict__ key_cache,
         const half* __restrict__ value_cache,
@@ -297,6 +297,18 @@ namespace{
         }
         __syncthreads();
         denom = shared_denom;
+
+        /*
+            Convert scores[] in-place into softmax probabilities.
+
+            v7 computed exp(scores - max) once for denom and again in the V pass
+            v9 stores prob directly in shared memory so the V pass only reads prob.
+        */
+
+        for(int64_t token_pos = tid; token_pos < seq_len; token_pos += THREADS_PER_HEAD){
+            scores[token_pos] = expf(scores[token_pos] - max_score) / denom;
+        }
+        __syncthreads();
         
 
         if(!isfinite(max_score) || !isfinite(denom) || denom == 0.0f){
@@ -317,7 +329,7 @@ namespace{
                 int64_t block_table_idx = sequence_id * max_blocks_per_seq + logical_block_id;
                 int64_t physical_block_id = static_cast<int64_t>(block_tables[block_table_idx]);
 
-                float prob = expf(scores[token_pos] - max_score) / denom;
+                float prob = scores[token_pos];
 
                 int64_t v_idx = (((layer_id * num_blocks + physical_block_id) * block_size + block_offset) * num_kv_heads + kv_head_id) * head_dim + output_dim;
                 float v_val = __half2float(value_cache[v_idx]);
@@ -397,7 +409,7 @@ torch::Tensor paged_attention_decode_batch_cuda(
     dim3 grid(num_query_heads, batch_size);
     dim3 block(THREADS_PER_HEAD);
 
-    paged_attention_decode_batch_kernel_v7<<<grid, block>>>(
+    paged_attention_decode_batch_kernel_v9a<<<grid, block>>>(
         reinterpret_cast<const half*>(q.data_ptr<at::Half>()),
         reinterpret_cast<const half*>(key_cache.data_ptr<at::Half>()),
         reinterpret_cast<const half*>(value_cache.data_ptr<at::Half>()),
