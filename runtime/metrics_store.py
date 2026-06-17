@@ -1,7 +1,7 @@
 from threading import Lock
 from typing import Any
 
-from request_state import RequestState
+from .request_state import RequestState
 
 class MetricsStore:
     def __init__(self) -> None:

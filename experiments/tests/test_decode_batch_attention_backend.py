@@ -11,12 +11,13 @@ if str(REPO_ROOT) not in sys.path:
 
 import torch
 
-from attention_backend import build_attention_backend
-from decode_batch import build_decode_batch
-from kv_block_manager import KVBlockManager
-from kv_cache_layout import KVCacheLayout
-from kv_cache_pool import KVCachePool
-from request_state import RequestState
+from runtime.attention_backend import build_attention_backend
+from runtime.decode_batch import build_decode_batch
+from runtime.kv_block_manager import KVBlockManager
+from runtime.kv_cache_layout import KVCacheLayout
+from runtime.kv_cache_pool import KVCachePool
+from runtime.request_state import RequestState
+from unittest.mock import patch
 
 
 def make_request_state(
@@ -111,7 +112,7 @@ def time_backend(
     return out, float(torch.tensor(times).median().item())
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--seq-len", type=int, default=128)
@@ -122,7 +123,7 @@ def main() -> None:
     parser.add_argument("--num-layers", type=int, default=1)
     parser.add_argument("--total-blocks", type=int, default=1024)
     parser.add_argument("--iters", type=int, default=50)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for this integration test")
@@ -261,6 +262,13 @@ def main() -> None:
     print(f"cuda_med_ms: {cuda_med_ms:.6f}")
     print(f"speedup:     {ref_med_ms / cuda_med_ms:.2f}x")
     print("passed")
+
+
+
+
+def test_decode_batch_attention_backend() -> None:
+    with patch("sys.argv", ["test_decode_batch_attention_backend.py"]):
+        main([])
 
 
 if __name__ == "__main__":

@@ -9,17 +9,30 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 
-from kv_block_manager import KVBlockManager
-from kv_cache_layout import KVCacheLayout
-from kv_cache_pool import KVCachePool
-from paged_attention_reference import paged_attention_decode_reference
+from runtime.kv_block_manager import KVBlockManager
+from runtime.kv_cache_layout import KVCacheLayout
+from runtime.kv_cache_pool import KVCachePool
+from runtime.paged_attention_reference import paged_attention_decode_reference
 
 import paged_attention_cuda
 
 
-KERNEL_NAME = "paged_attention_cuda_v2"
-SEQ_LENS = [1, 7, 8, 9, 19]
+KERNEL_NAME = "paged_attention_cuda_v5_batched"
+SEQ_LEN_CASES = [
+    [1],
+    [7, 8],
+    [9, 19, 32, 64],
+    [64, 128, 256, 512],
+]
 MAX_ALLOWED_DIFF = 1e-2
+
+NUM_LAYERS = 2
+TOTAL_BLOCKS = 4096
+BLOCK_SIZE_TOKENS = 8
+NUM_KV_HEADS = 2
+HEAD_DIM = 32
+DTYPE = "float16"
+DEVICE = "cuda"
 
 
 def fill_request_kv(
@@ -52,20 +65,39 @@ def fill_request_kv(
         )
 
 
-def run_one_case(
-    seq_len: int,
+def make_padded_block_tables(
+    block_tables: list[list[int]],
+    pad_value: int = -1,
+) -> torch.Tensor:
+    max_blocks = max(len(block_table) for block_table in block_tables)
+
+    padded = []
+
+    for block_table in block_tables:
+        row = block_table + [pad_value] * (max_blocks - len(block_table))
+        padded.append(row)
+
+    return torch.tensor(
+        padded,
+        dtype=torch.int32,
+        device=DEVICE,
+    ).contiguous()
+
+
+def make_case(
+    seq_lens: list[int],
     seed: int,
 ) -> dict[str, Any]:
     torch.manual_seed(seed)
 
     layout = KVCacheLayout(
-        num_layers=2,
-        total_blocks=16,
-        block_size_tokens=8,
-        num_kv_heads=2,
-        head_dim=32,
-        dtype="float16",
-        device="cuda",
+        num_layers=NUM_LAYERS,
+        total_blocks=TOTAL_BLOCKS,
+        block_size_tokens=BLOCK_SIZE_TOKENS,
+        num_kv_heads=NUM_KV_HEADS,
+        head_dim=HEAD_DIM,
+        dtype=DTYPE,
+        device=DEVICE,
     )
 
     block_manager = KVBlockManager(
@@ -77,49 +109,110 @@ def run_one_case(
     cache_pool.zero_()
 
     layer_id = 0
-    num_query_heads = layout.num_kv_heads
+    block_tables: list[list[int]] = []
 
-    request_id = f"req-seq-{seq_len}"
-    block_table = block_manager.allocate_for_tokens(
-        request_id=request_id,
-        num_tokens=seq_len,
-    )
+    for request_index, seq_len in enumerate(seq_lens):
+        request_id = f"batch-req-{seed}-{request_index}"
 
-    fill_request_kv(
-        cache_pool=cache_pool,
-        layer_id=layer_id,
-        block_table=block_table,
-        seq_len=seq_len,
-    )
+        block_table = block_manager.allocate_for_tokens(
+            request_id=request_id,
+            num_tokens=seq_len,
+        )
+
+        fill_request_kv(
+            cache_pool=cache_pool,
+            layer_id=layer_id,
+            block_table=block_table,
+            seq_len=seq_len,
+        )
+
+        block_tables.append(block_table)
+
+    batch_size = len(seq_lens)
 
     q = torch.randn(
-        num_query_heads,
+        batch_size,
+        layout.num_kv_heads,
         layout.head_dim,
-        device="cuda",
+        device=DEVICE,
         dtype=layout.torch_dtype,
-    )
-
-    block_table_tensor = torch.tensor(
-        block_table,
-        dtype=torch.int32,
-        device="cuda",
     ).contiguous()
 
-    reference_output = paged_attention_decode_reference(
+    block_tables_tensor = make_padded_block_tables(block_tables)
+
+    seq_lens_tensor = torch.tensor(
+        seq_lens,
+        dtype=torch.int32,
+        device=DEVICE,
+    ).contiguous()
+
+    return {
+        "layout": layout,
+        "cache_pool": cache_pool,
+        "layer_id": layer_id,
+        "seq_lens": seq_lens,
+        "seq_lens_tensor": seq_lens_tensor,
+        "block_tables": block_tables,
+        "block_tables_tensor": block_tables_tensor,
+        "q": q,
+    }
+
+
+def reference_batch_decode(
+    q: torch.Tensor,
+    cache_pool: KVCachePool,
+    layer_id: int,
+    block_tables: list[list[int]],
+    seq_lens: list[int],
+) -> torch.Tensor:
+    outputs = []
+
+    for batch_index, seq_len in enumerate(seq_lens):
+        output_i = paged_attention_decode_reference(
+            q=q[batch_index],
+            cache_pool=cache_pool,
+            layer_id=layer_id,
+            block_table=block_tables[batch_index],
+            seq_len=seq_len,
+        )
+
+        outputs.append(output_i)
+
+    return torch.stack(outputs, dim=0)
+
+
+def run_one_case(
+    seq_lens: list[int],
+    seed: int,
+) -> dict[str, Any]:
+    case = make_case(
+        seq_lens=seq_lens,
+        seed=seed,
+    )
+
+    layout: KVCacheLayout = case["layout"]
+    cache_pool: KVCachePool = case["cache_pool"]
+    layer_id: int = case["layer_id"]
+    block_tables: list[list[int]] = case["block_tables"]
+    block_tables_tensor: torch.Tensor = case["block_tables_tensor"]
+    seq_lens_tensor: torch.Tensor = case["seq_lens_tensor"]
+    q: torch.Tensor = case["q"]
+
+    reference_output = reference_batch_decode(
         q=q,
         cache_pool=cache_pool,
         layer_id=layer_id,
-        block_table=block_table,
-        seq_len=seq_len,
+        block_tables=block_tables,
+        seq_lens=seq_lens,
     )
 
-    cuda_output = paged_attention_cuda.paged_attention_decode(
-        q.contiguous(),
-        cache_pool.key_cache.contiguous(),
-        cache_pool.value_cache.contiguous(),
-        block_table_tensor,
+    cuda_output = paged_attention_cuda.paged_attention_decode_batch(
+        q,
+        cache_pool.key_cache,
+        cache_pool.value_cache,
+        block_tables_tensor,
+        seq_lens_tensor,
         layer_id,
-        seq_len,
     )
 
     diff = cuda_output.float() - reference_output.float()
@@ -138,15 +231,17 @@ def run_one_case(
 
     return {
         "kernel_name": KERNEL_NAME,
-        "seq_len": seq_len,
         "seed": seed,
-        "passed": passed,
+        "batch_size": len(seq_lens),
+        "seq_lens": seq_lens,
+        "passed": bool(passed),
         "max_abs_diff": max_abs_diff,
         "reference_finite": bool(reference_finite),
         "cuda_finite": bool(cuda_finite),
         "diff_finite": bool(diff_finite),
         "layout": layout.snapshot(),
-        "block_table": block_table,
+        "block_tables": block_tables,
+        "block_tables_shape": tuple(block_tables_tensor.shape),
         "reference_output_shape": tuple(reference_output.shape),
         "cuda_output_shape": tuple(cuda_output.shape),
         "cuda_output_sample": cuda_output.flatten()[:8].detach().cpu().tolist(),
@@ -192,20 +287,19 @@ def write_markdown_report(
     lines.append("## Goal")
     lines.append("")
     lines.append(
-        "Validate that the CUDA C++ paged attention decode kernel matches the "
-        "PyTorch paged attention reference across important sequence-length cases."
+        "Validate the batched CUDA paged attention decode kernel against the "
+        "single-request PyTorch paged attention reference."
     )
-    lines.append("")
-    lines.append("This test is correctness-focused, not performance-focused.")
     lines.append("")
     lines.append("## Kernel Scope")
     lines.append("")
     lines.append("- Decode-only attention")
-    lines.append("- Single request")
-    lines.append("- One CUDA block per attention head")
+    lines.append("- Batched requests")
+    lines.append("- Variable sequence lengths per batch")
+    lines.append("- One CUDA block per sequence/head pair")
     lines.append("- `num_query_heads == num_kv_heads`")
     lines.append("- FP16 inputs with FP32 accumulation")
-    lines.append("- Paged KV layout using physical block tables")
+    lines.append("- Paged KV layout using padded physical block tables")
     lines.append("")
     lines.append("## Environment")
     lines.append("")
@@ -225,48 +319,39 @@ def write_markdown_report(
     lines.append("")
     lines.append("## Correctness Grid")
     lines.append("")
-    lines.append("| seq_len | block_table | max_abs_diff | passed |")
-    lines.append("|---:|---|---:|---|")
+    lines.append("| batch_size | seq_lens | block_tables_shape | max_abs_diff | passed |")
+    lines.append("|---:|---|---|---:|---|")
 
     for result in results:
         lines.append(
-            f"| {result['seq_len']} | `{result['block_table']}` | "
-            f"{result['max_abs_diff']:.8f} | {result['passed']} |"
+            f"| {result['batch_size']} "
+            f"| `{result['seq_lens']}` "
+            f"| `{result['block_tables_shape']}` "
+            f"| {result['max_abs_diff']:.8f} "
+            f"| {result['passed']} |"
         )
 
     lines.append("")
     lines.append("## Result")
     lines.append("")
     if all_passed:
-        lines.append("All correctness cases passed.")
+        lines.append("All batched correctness cases passed.")
     else:
-        lines.append("One or more correctness cases failed.")
-    lines.append("")
-    lines.append("## Why These Sequence Lengths Matter")
-    lines.append("")
-    lines.append("- `1`: one-token attention; output should equal the only value vector")
-    lines.append("- `7`: partial first block")
-    lines.append("- `8`: exact block boundary")
-    lines.append("- `9`: crosses from block 0 into block 1")
-    lines.append("- `19`: multi-block sequence")
+        lines.append("One or more batched correctness cases failed.")
     lines.append("")
     lines.append("## Interpretation")
     lines.append("")
     lines.append(
-        "The CUDA kernel consumes the same ABI as the Python reference: query tensor, "
-        "physical key/value cache tensors, block table, layer id, and sequence length."
-    )
-    lines.append("")
-    lines.append(
-        "Passing this grid validates that the kernel can walk the paged KV block table "
-        "and reproduce dense/reference attention results across block-boundary cases."
+        "Passing this grid validates that the CUDA kernel can map each batch row "
+        "to its own padded block table, use its own sequence length, and produce "
+        "the same output as independently decoding each request with the reference path."
     )
     lines.append("")
     lines.append("## Next Step")
     lines.append("")
     lines.append(
-        "If this is v2, the next step is either benchmarking against v1 or moving toward "
-        "a more efficient kernel that avoids repeated QK recomputation."
+        "The next step is a batch-size sweep benchmark to verify that more "
+        "sequence/head CTAs improve GPU occupancy and serving-shaped throughput."
     )
     lines.append("")
 
@@ -274,16 +359,17 @@ def write_markdown_report(
 
 
 def print_terminal_summary(results: list[dict[str, Any]]) -> None:
-    print(f"{KERNEL_NAME}")
+    print(KERNEL_NAME)
     print("---")
     print("loaded extension:", paged_attention_cuda.__file__)
-    print("seq_len | block_table | max_abs_diff | passed")
-    print("--- | --- | --- | ---")
+    print("batch_size | seq_lens | block_tables_shape | max_abs_diff | passed")
+    print("--- | --- | --- | --- | ---")
 
     for result in results:
         print(
-            f"{result['seq_len']} | "
-            f"{result['block_table']} | "
+            f"{result['batch_size']} | "
+            f"{result['seq_lens']} | "
+            f"{result['block_tables_shape']} | "
             f"{result['max_abs_diff']:.8f} | "
             f"{result['passed']}"
         )
@@ -298,11 +384,12 @@ def main() -> None:
 
     results = []
 
-    for index, seq_len in enumerate(SEQ_LENS):
+    for index, seq_lens in enumerate(SEQ_LEN_CASES):
         result = run_one_case(
-            seq_len=seq_len,
+            seq_lens=seq_lens,
             seed=index,
         )
+
         results.append(result)
 
     print_terminal_summary(results)
@@ -326,10 +413,16 @@ def main() -> None:
     )
 
     print()
-    print(f"wrote JSON: {results_json_path}")
-    print(f"wrote markdown: {markdown_path}")
+    print(f"wrote JSON: {results_json_path.resolve()}")
+    print(f"wrote markdown: {markdown_path.resolve()}")
 
     assert all(result["passed"] for result in results)
+
+
+
+
+def test_paged_attention_cuda_batch() -> None:
+    main()
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(PROJECT_ROOT))
 
-from model_runner import ModelRunner
+from engines.model_runner import ModelRunner
 
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"

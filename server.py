@@ -3,15 +3,17 @@ import os
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
-from engine_scheduler import EngineScheduler
-from hf_decode_engine import HFDecodeEngine
-from kv_block_manager import KVBlockManager
-from metrics_store import MetricsStore
-from model_runner import ModelRunner
-from request_queue import RequestQueue
-from request_state import RequestState
+from runtime.engine_scheduler import EngineScheduler
+from runtime.kv_block_manager import KVBlockManager
+from runtime.metrics_store import MetricsStore
+from runtime.request_queue import RequestQueue
+from runtime.request_state import RequestState
+
+from engines.model_runner import ModelRunner
 from schemas import GenerateRequest, GenerateResponse
-from synthetic_cuda_decode_engine import SyntheticCudaDecodeEngine
+
+from engines.hf_decode_engine import HFDecodeEngine
+from engines.synthetic_cuda_decode_engine import SyntheticCudaDecodeEngine
 
 
 ENGINE_BACKEND = os.getenv("ENGINE_BACKEND", "hf").lower()

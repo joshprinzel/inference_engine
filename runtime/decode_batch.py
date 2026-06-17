@@ -2,8 +2,8 @@ from dataclasses import dataclass
 
 import torch
 
-from kv_block_manager import KVBlockManager
-from request_state import RequestState
+from .kv_block_manager import KVBlockManager
+from .request_state import RequestState
 
 
 @dataclass(frozen=True)

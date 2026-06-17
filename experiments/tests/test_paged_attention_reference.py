@@ -6,10 +6,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 
-from kv_block_manager import KVBlockManager
-from kv_cache_layout import KVCacheLayout
-from kv_cache_pool import KVCachePool
-from paged_attention_reference import (
+from runtime.kv_block_manager import KVBlockManager
+from runtime.kv_cache_layout import KVCacheLayout
+from runtime.kv_cache_pool import KVCachePool
+from runtime.paged_attention_reference import (
     gather_kv_for_sequence,
     paged_attention_decode_batch_reference,
     paged_attention_decode_reference,
@@ -221,6 +221,12 @@ def main() -> None:
 
     assert batch_diff_0 < 1e-2
     assert batch_diff_1 < 1e-2
+
+
+
+
+def test_paged_attention_reference() -> None:
+    main()
 
 
 if __name__ == "__main__":

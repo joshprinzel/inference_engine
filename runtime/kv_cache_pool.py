@@ -1,6 +1,6 @@
 import torch
 
-from kv_cache_layout import KVCacheLayout
+from .kv_cache_layout import KVCacheLayout
 
 
 class KVCachePool:

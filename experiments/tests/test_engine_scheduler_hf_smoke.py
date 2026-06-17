@@ -7,13 +7,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from engine_scheduler import EngineScheduler
-from hf_decode_engine import HFDecodeEngine
-from kv_block_manager import KVBlockManager
-from metrics_store import MetricsStore
-from model_runner import ModelRunner
-from request_queue import RequestQueue
-from request_state import RequestState
+from runtime.engine_scheduler import EngineScheduler
+from engines.hf_decode_engine import HFDecodeEngine
+from runtime.kv_block_manager import KVBlockManager
+from runtime.metrics_store import MetricsStore
+from engines.model_runner import ModelRunner
+from runtime.request_queue import RequestQueue
+from runtime.request_state import RequestState
 
 
 def main() -> None:
@@ -61,6 +61,12 @@ def main() -> None:
 
     print("generated_text:", finished.generated_text)
     print("passed")
+
+
+
+
+def test_engine_scheduler_hf_smoke() -> None:
+    main()
 
 
 if __name__ == "__main__":

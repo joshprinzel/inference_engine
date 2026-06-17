@@ -6,8 +6,8 @@ import sys
 
 import torch
 
-from kv_cache_pool import KVCachePool
-from paged_attention_reference import paged_attention_decode_batch_reference
+from .kv_cache_pool import KVCachePool
+from .paged_attention_reference import paged_attention_decode_batch_reference
 
 
 class AttentionBackend(ABC):

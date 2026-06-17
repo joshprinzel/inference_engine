@@ -8,10 +8,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 
-from kv_block_manager import KVBlockManager
-from kv_cache_layout import KVCacheLayout
-from kv_cache_pool import KVCachePool
-from paged_attention_reference import paged_attention_decode_reference
+from runtime.kv_block_manager import KVBlockManager
+from runtime.kv_cache_layout import KVCacheLayout
+from runtime.kv_cache_pool import KVCachePool
+from runtime.paged_attention_reference import paged_attention_decode_reference
 
 import paged_attention_cuda
 

@@ -4,8 +4,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from kv_block_manager import KVBlockManager
-from kv_cache_layout import KVCacheLayout
+from runtime.kv_block_manager import KVBlockManager
+from runtime.kv_cache_layout import KVCacheLayout
 
 def main() -> None:
     layout = KVCacheLayout(
@@ -65,6 +65,12 @@ def main() -> None:
     print("freed:", freed)
     print("after free:")
     print(manager.snapshot())
+
+
+
+
+def test_kv_block_manager() -> None:
+    main()
 
 
 if __name__ == "__main__":

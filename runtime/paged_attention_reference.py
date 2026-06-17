@@ -1,7 +1,7 @@
 import math
 import torch 
 
-from kv_cache_pool import KVCachePool
+from .kv_cache_pool import KVCachePool
 
 
 def gather_kv_for_sequence(

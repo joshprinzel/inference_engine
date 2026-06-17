@@ -7,12 +7,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from engine_scheduler import EngineScheduler
-from kv_block_manager import KVBlockManager
-from metrics_store import MetricsStore
-from request_queue import RequestQueue
-from request_state import RequestState
-from synthetic_cuda_decode_engine import SyntheticCudaDecodeEngine
+from runtime.engine_scheduler import EngineScheduler
+from runtime.kv_block_manager import KVBlockManager
+from runtime.metrics_store import MetricsStore
+from runtime.request_queue import RequestQueue
+from runtime.request_state import RequestState
+from engines.synthetic_cuda_decode_engine import SyntheticCudaDecodeEngine
 
 
 def main() -> None:
@@ -99,6 +99,12 @@ def main() -> None:
 
     print("passed")
 
+
+
+
+
+def test_engine_scheduler_synthetic_cuda_smoke() -> None:
+    main()
 
 
 if __name__ == "__main__":

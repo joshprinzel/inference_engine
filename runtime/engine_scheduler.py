@@ -3,11 +3,13 @@ from queue import Empty
 from threading import Lock, Thread
 from typing import Optional
 
-from decode_engine import DecodeEngine, DecodeStepOutput
-from kv_block_manager import KVBlockAllocationError, KVBlockManager
-from metrics_store import MetricsStore
-from request_queue import RequestQueue
-from request_state import RequestState
+
+
+from .metrics_store import MetricsStore
+from .decode_engine import DecodeEngine, DecodeStepOutput
+from .kv_block_manager import KVBlockAllocationError, KVBlockManager
+from .request_queue import RequestQueue
+from .request_state import RequestState
 
 
 class EngineScheduler:

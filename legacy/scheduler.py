@@ -12,11 +12,11 @@ from threading import Thread, Lock
 import time
 from queue import Empty
 
-from metrics_store import MetricsStore
-from model_runner import ModelRunner
-from request_state import RequestState
-from request_queue import RequestQueue
-from batch_metrics import BatchMetrics
+from runtime.metrics_store import MetricsStore
+from engines.model_runner import ModelRunner
+from runtime.request_state import RequestState
+from runtime.request_queue import RequestQueue
+from runtime.batch_metrics import BatchMetrics
 
 class Scheduler:
     def __init__(

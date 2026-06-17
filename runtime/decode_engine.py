@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from kv_block_manager import KVBlockManager
-from request_state import RequestState
+from .kv_block_manager import KVBlockManager
+from .request_state import RequestState
 
 
 @dataclass(frozen=True)

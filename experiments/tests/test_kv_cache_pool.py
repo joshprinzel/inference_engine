@@ -6,9 +6,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 
-from kv_block_manager import KVBlockManager
-from kv_cache_layout import KVCacheLayout
-from kv_cache_pool import KVCachePool
+from runtime.kv_block_manager import KVBlockManager
+from runtime.kv_cache_layout import KVCacheLayout
+from runtime.kv_cache_pool import KVCachePool
 
 
 def main() -> None:
@@ -101,6 +101,12 @@ def main() -> None:
 
     assert key_matches
     assert value_matches
+
+
+
+
+def test_kv_cache_pool() -> None:
+    main()
 
 
 if __name__ == "__main__":

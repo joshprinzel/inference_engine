@@ -1,6 +1,6 @@
 from queue import Empty, Queue
 
-from request_state import RequestState
+from .request_state import RequestState
 
 
 class RequestQueue:
