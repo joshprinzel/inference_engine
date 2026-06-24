@@ -176,3 +176,175 @@ def llama_attention_with_output_projection(
     )
     merged = merge_attention_heads(attn_output)
     return F.linear(merged, o_proj_weight, o_proj_bias)
+
+
+
+# Cached Aware Attention Helpers Past This Point
+
+def concat_past_key_value(
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        past_key: torch.Tensor | None,
+        past_value: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Append current-step K/V to previous cached K/V.
+
+    Shapes:
+        key_states: [batch, kv_heads, q_len, head_dim]
+        value_states: [batch, kv_heads, q_len, head_dim]
+        past_key: [batch, kv_heads, past_len, head_dim] or None
+        past_value: [batch, kv_heads, past_len, head_dim] or None
+
+    Returns:
+        full_key:   [batch, kv_heads, past_len + q_len, head_dim]
+        full_value: [batch, kv_heads, past_len + q_len, head_dim]
+    """
+
+    if past_key is None:
+        full_key = key_states
+    else:
+        full_key = torch.cat([past_key, key_states], dim=2)
+    
+
+    if past_value is None:
+        full_value = value_states
+    else:
+        full_value = torch.cat([past_value, value_states], dim=2)
+    
+    return full_key, full_value
+
+
+def build_decode_attention_mask(
+        batch_size: int,
+        q_len: int,
+        kv_len: int,
+        past_len: int,
+        device: torch.device | str,
+        dtype: torch.dtype,
+) -> torch.Tensor:
+    """
+    Build additive causal mask for cached decode.
+
+    For prefill:
+        past_len = 0
+        q_len = prompt length
+        kv_len = prompt length
+
+    For one-token decode:
+        past_len = previous cache length
+        q_len = 1
+        kv_len = past_len + 1
+
+    The rule is:
+        query absolute position = past_len + query_index
+        key absolute position = key_index
+        mask if key_position > query_position
+    """
+
+    query_positions = past_len + torch.arange(q_len, device=device)
+    key_positions = torch.arange(kv_len, device=device)
+
+    allowed = key_positions.unsqueeze(0) <= query_positions.unsqueeze(1)
+
+    mask = torch.zeros((q_len, kv_len), device=device, dtype=dtype)
+    mask = mask.masked_fill(~allowed, torch.finfo(dtype).min)
+
+    mask = mask.unsqueeze(0).unsqueeze(0)
+    return mask.expand(batch_size,1,q_len, kv_len)
+
+def llama_attention_with_kv_cache(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    past_key: torch.Tensor | None,
+    past_value: torch.Tensor | None,
+    num_key_value_groups: int,
+    attention_mask: torch.Tensor | None = None,
+    scaling: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    GQA attention with append-only K/V cache.
+
+    Args:
+        q:
+            [batch, q_heads, q_len, head_dim]
+        k:
+            [batch, kv_heads, q_len, head_dim]
+        v:
+            [batch, kv_heads, q_len, head_dim]
+        past_key:
+            [batch, kv_heads, past_len, head_dim] or None
+        past_value:
+            [batch, kv_heads, past_len, head_dim] or None
+
+    Returns:
+        attn_output:
+            [batch, q_heads, q_len, head_dim]
+        present_key:
+            [batch, kv_heads, past_len + q_len, head_dim]
+        present_value:
+            [batch, kv_heads, past_len + q_len, head_dim]
+    """
+
+    batch_size, num_q_heads, q_len, head_dim = q.shape
+
+    present_key, present_value = concat_past_key_value(
+        key_states=k,
+        value_states=v,
+        past_key=past_key,
+        past_value=past_value,
+    )
+
+    _, _, kv_len, _ = present_key.shape
+
+    if scaling is None:
+        scaling = head_dim**-0.5
+
+    repeated_key = repeat_kv(present_key, num_key_value_groups)
+    repeated_value = repeat_kv(present_value, num_key_value_groups)
+
+    assert repeated_key.shape == (batch_size, num_q_heads, kv_len, head_dim)
+    assert repeated_value.shape == (batch_size, num_q_heads, kv_len, head_dim)
+
+    attn_weights = torch.matmul(q, repeated_key.transpose(2, 3)) * scaling
+
+    if attention_mask is not None:
+        attention_mask = attention_mask[:, :, :, :kv_len]
+        attn_weights = attn_weights + attention_mask
+
+    attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
+    attn_output = torch.matmul(attn_weights, repeated_value)
+
+    assert attn_output.shape == (batch_size, num_q_heads, q_len, head_dim)
+
+    return attn_output, present_key, present_value
+
+
+def llama_attention_with_kv_cache_and_output_projection(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o_proj_weight: torch.Tensor,
+    o_proj_bias: torch.Tensor | None,
+    past_key: torch.Tensor | None,
+    past_value: torch.Tensor | None,
+    num_key_value_groups: int,
+    attention_mask: torch.Tensor | None = None,
+    scaling: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    attn_output, present_key, present_value = llama_attention_with_kv_cache(
+        q=q,
+        k=k,
+        v=v,
+        past_key=past_key,
+        past_value=past_value,
+        num_key_value_groups=num_key_value_groups,
+        attention_mask=attention_mask,
+        scaling=scaling,
+    )
+
+    merged = merge_attention_heads(attn_output)
+    projected = F.linear(merged, o_proj_weight, o_proj_bias)
+
+    return projected, present_key, present_value
