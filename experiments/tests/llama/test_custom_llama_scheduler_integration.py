@@ -78,8 +78,9 @@ def test_custom_llama_engine_runs_through_scheduler() -> None:
 
     assert scheduler.last_backend_ms is not None
     assert scheduler.last_decode_batch_snapshot is not None
-    assert scheduler.last_decode_batch_snapshot["backend"] == "custom-llama-contiguous-kv-cache"
+    assert scheduler.last_decode_batch_snapshot["backend"] == "custom-llama-kv-cache-pool-gather"
     assert scheduler.last_decode_batch_snapshot["uses_kv_cache"] is True
+    assert scheduler.last_decode_batch_snapshot["uses_kv_cache_pool"] is True
     assert scheduler.last_decode_batch_snapshot["uses_paged_attention"] is False
 
     assert kv_block_manager.used_block_count() == 0

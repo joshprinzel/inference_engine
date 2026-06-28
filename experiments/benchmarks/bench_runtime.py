@@ -1,0 +1,479 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import statistics
+import time
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import torch
+
+from engines.llama.custom_llama_decode_engine import CustomLlamaDecodeEngine
+from runtime.engine_scheduler import EngineScheduler
+from runtime.kv_block_manager import KVBlockManager
+from runtime.metrics_store import MetricsStore
+from runtime.request_queue import RequestQueue
+from runtime.request_state import RequestState
+
+
+DEFAULT_PROMPTS = {
+    "france": "The capital of France is",
+    "germany": "The capital of Germany is",
+    "italy": "The capital of Italy is",
+    "spain": "The capital of Spain is",
+}
+
+
+@dataclass(frozen=True)
+class BenchmarkConfig:
+    backend: str
+    num_requests: int
+    max_slots: int
+    max_new_tokens: int
+    block_size_tokens: int
+    total_kv_blocks: int
+    dtype: str
+    device: str
+    prompt_set: str
+
+
+@dataclass(frozen=True)
+class BenchmarkResult:
+    run_kind: str
+    repeat_index: int
+
+    backend: str
+    num_requests: int
+    max_slots: int
+    max_new_tokens: int
+    block_size_tokens: int
+    total_kv_blocks: int
+    dtype: str
+    device: str
+    prompt_set: str
+
+    total_wall_seconds: float
+    tokens_generated: int
+    tokens_per_second: float
+
+    decode_iterations: int
+    decode_batches_built: int
+    admitted_count: int
+    decode_stalls: int
+    kv_allocation_failures: int
+    kv_oom_evictions: int
+    late_admissions: int
+    early_finishes: int
+
+    backend_ms_median: float
+    backend_ms_p95: float
+    backend_ms_min: float
+    backend_ms_max: float
+    backend_ms_mean: float
+
+    kv_peak_used_blocks: int
+    kv_final_used_blocks: int
+    kv_final_free_blocks: int
+    kv_final_utilization: float
+
+    all_finished: bool
+    generated_text_by_request: str
+    expected_text_by_request: str
+    correctness_passed: bool
+
+
+def parse_dtype(dtype_name: str) -> torch.dtype:
+    if dtype_name == "float16":
+        return torch.float16
+    if dtype_name == "bfloat16":
+        return torch.bfloat16
+    if dtype_name == "float32":
+        return torch.float32
+
+    raise ValueError(f"Unsupported dtype: {dtype_name}")
+
+
+def percentile(values: list[float], p: float) -> float:
+    if not values:
+        return 0.0
+
+    if len(values) == 1:
+        return values[0]
+
+    sorted_values = sorted(values)
+    index = int(round((p / 100.0) * (len(sorted_values) - 1)))
+    return sorted_values[index]
+
+
+def build_prompts(num_requests: int, prompt_set: str) -> list[tuple[str, str, str]]:
+    if prompt_set != "capitals":
+        raise ValueError(f"Unsupported prompt_set: {prompt_set}")
+
+    items = list(DEFAULT_PROMPTS.items())
+
+    requests: list[tuple[str, str, str]] = []
+
+    for i in range(num_requests):
+        name, prompt = items[i % len(items)]
+        request_id = f"req-{i}-{name}"
+
+        expected_prefix_by_name = {
+            "france": "Paris",
+            "germany": "Berlin",
+            "italy": "Rome",
+            "spain": "Madrid",
+        }
+
+        expected_prefix = expected_prefix_by_name[name]
+        requests.append((request_id, prompt, expected_prefix))
+
+    return requests
+
+
+def make_engine(config: BenchmarkConfig) -> CustomLlamaDecodeEngine:
+    if config.backend != "custom-cuda-paged":
+        raise ValueError(
+            f"Unsupported backend for v0 benchmark harness: {config.backend}. "
+            "Start with custom-cuda-paged, then add hf/custom-pytorch/synthetic."
+        )
+
+    return CustomLlamaDecodeEngine(
+        device=config.device,
+        dtype=parse_dtype(config.dtype),
+        attention_backend_name="cuda",
+        total_kv_blocks=config.total_kv_blocks,
+        block_size_tokens=config.block_size_tokens,
+    )
+
+
+def run_single_benchmark(
+        config: BenchmarkConfig,
+        run_kind: str,
+        repeat_index: int) -> BenchmarkResult:
+    if config.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA benchmark requested, but CUDA is not available")
+
+    if config.device == "cuda":
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+    engine = make_engine(config)
+
+    request_queue = RequestQueue()
+    metrics_store = MetricsStore()
+    kv_block_manager = KVBlockManager(
+        total_blocks=config.total_kv_blocks,
+        block_size_tokens=config.block_size_tokens,
+    )
+
+    scheduler = EngineScheduler(
+        decode_engine=engine,
+        request_queue=request_queue,
+        metrics_store=metrics_store,
+        kv_block_manager=kv_block_manager,
+        max_slots=config.max_slots,
+    )
+
+    prompt_specs = build_prompts(
+        num_requests=config.num_requests,
+        prompt_set=config.prompt_set,
+    )
+
+    expected_text_by_request: dict[str, str] = {}
+
+    for request_id, prompt, expected_prefix in prompt_specs:
+        request_state = RequestState(
+            request_id=request_id,
+            prompt=prompt,
+            max_new_tokens=config.max_new_tokens,
+        )
+
+        request_queue.put(request_state)
+
+        # We only require the prefix because tokenization/newline tails can vary
+        # once max_new_tokens changes.
+        expected_text_by_request[request_id] = expected_prefix
+
+    backend_ms_values: list[float] = []
+    kv_used_blocks_values: list[int] = []
+
+    max_steps = config.max_new_tokens + config.num_requests + 16
+
+    if config.device == "cuda":
+        torch.cuda.synchronize()
+
+    start = time.perf_counter()
+
+    for _ in range(max_steps):
+        scheduler.step()
+
+        if scheduler.last_backend_ms is not None:
+            backend_ms_values.append(float(scheduler.last_backend_ms))
+
+        snapshot = scheduler.snapshot()
+        kv_used_blocks_values.append(int(snapshot["kv_used_blocks"]))
+
+        if len(scheduler.finished) == config.num_requests:
+            break
+
+    if config.device == "cuda":
+        torch.cuda.synchronize()
+
+    total_wall_seconds = time.perf_counter() - start
+
+    final_snapshot = scheduler.snapshot()
+    kv_snapshot = scheduler.kv_block_manager.snapshot()
+
+    generated_text_by_request = {
+        request.request_id: request.generated_text
+        for request in scheduler.finished
+    }
+
+    correctness_by_request = {
+        request_id: generated_text_by_request.get(request_id, "").startswith(expected_prefix)
+        for request_id, expected_prefix in expected_text_by_request.items()
+    }
+
+    correctness_passed = all(correctness_by_request.values())
+    all_finished = len(scheduler.finished) == config.num_requests
+
+    tokens_generated = int(scheduler.tokens_generated)
+    tokens_per_second = (
+        tokens_generated / total_wall_seconds if total_wall_seconds > 0 else 0.0
+    )
+
+    return BenchmarkResult(
+        run_kind=run_kind,
+        repeat_index=repeat_index,
+        backend=config.backend,
+        num_requests=config.num_requests,
+        max_slots=config.max_slots,
+        max_new_tokens=config.max_new_tokens,
+        block_size_tokens=config.block_size_tokens,
+        total_kv_blocks=config.total_kv_blocks,
+        dtype=config.dtype,
+        device=config.device,
+        prompt_set=config.prompt_set,
+        total_wall_seconds=total_wall_seconds,
+        tokens_generated=tokens_generated,
+        tokens_per_second=tokens_per_second,
+        decode_iterations=int(final_snapshot["decode_iterations"]),
+        decode_batches_built=int(final_snapshot["decode_batches_built"]),
+        admitted_count=int(final_snapshot["admitted_count"]),
+        decode_stalls=int(final_snapshot["decode_stalls"]),
+        kv_allocation_failures=int(final_snapshot["kv_allocation_failures"]),
+        kv_oom_evictions=int(final_snapshot["kv_oom_evictions"]),
+        late_admissions=int(final_snapshot["late_admissions"]),
+        early_finishes=int(final_snapshot["early_finishes"]),
+        backend_ms_median=statistics.median(backend_ms_values)
+        if backend_ms_values
+        else 0.0,
+        backend_ms_p95=percentile(backend_ms_values, 95.0),
+        backend_ms_min=min(backend_ms_values) if backend_ms_values else 0.0,
+        backend_ms_max=max(backend_ms_values) if backend_ms_values else 0.0,
+        backend_ms_mean=statistics.mean(backend_ms_values)
+        if backend_ms_values
+        else 0.0,
+        kv_peak_used_blocks=max(kv_used_blocks_values) if kv_used_blocks_values else 0,
+        kv_final_used_blocks=int(kv_snapshot["used_blocks"]),
+        kv_final_free_blocks=int(kv_snapshot["free_blocks"]),
+        kv_final_utilization=float(kv_snapshot["utilization"]),
+        all_finished=all_finished,
+        generated_text_by_request=json.dumps(
+            generated_text_by_request,
+            sort_keys=True,
+        ),
+        expected_text_by_request=json.dumps(
+            expected_text_by_request,
+            sort_keys=True,
+        ),
+        correctness_passed=correctness_passed,
+    )
+
+
+def write_jsonl(path: Path, rows: list[BenchmarkResult]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(asdict(row), sort_keys=True) + "\n")
+
+
+def write_csv(path: Path, rows: list[BenchmarkResult]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not rows:
+        raise ValueError("Cannot write empty benchmark rows")
+
+    fieldnames = list(asdict(rows[0]).keys())
+
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for row in rows:
+            writer.writerow(asdict(row))
+
+
+def write_summary(path: Path, rows: list[BenchmarkResult]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    lines = [
+        "# Runtime Benchmark Summary",
+        "",
+        f"Generated at: `{datetime.now().isoformat(timespec='seconds')}`",
+        "",
+        "| backend | requests | slots | new tokens | block size | tok/s | backend ms median | backend ms p95 | peak KV blocks | correct |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+
+    for row in rows:
+        lines.append(
+            "| "
+            f"{row.backend} | "
+            f"{row.num_requests} | "
+            f"{row.max_slots} | "
+            f"{row.max_new_tokens} | "
+            f"{row.block_size_tokens} | "
+            f"{row.tokens_per_second:.2f} | "
+            f"{row.backend_ms_median:.3f} | "
+            f"{row.backend_ms_p95:.3f} | "
+            f"{row.kv_peak_used_blocks} | "
+            f"{row.correctness_passed} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Notes",
+            "",
+            "- `total_wall_seconds` is end-to-end scheduler wall time.",
+            "- `backend_ms_*` comes from the decode engine's backend timing and includes Python/model/backend work inside `decode_step`.",
+            "- `kv_peak_used_blocks` is useful for graphing KV pressure under concurrency.",
+            "- `correctness_passed` checks generated text prefixes for the benchmark prompts.",
+            "",
+        ]
+    )
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def parse_int_list(raw: str) -> list[int]:
+    return [int(x.strip()) for x in raw.split(",") if x.strip()]
+
+
+def build_configs(args: argparse.Namespace) -> list[BenchmarkConfig]:
+    num_requests_values = parse_int_list(args.num_requests)
+    max_new_tokens_values = parse_int_list(args.max_new_tokens)
+    block_size_values = parse_int_list(args.block_size_tokens)
+
+    configs: list[BenchmarkConfig] = []
+
+    for num_requests in num_requests_values:
+        for max_new_tokens in max_new_tokens_values:
+            for block_size_tokens in block_size_values:
+                max_slots = args.max_slots or num_requests
+
+                configs.append(
+                    BenchmarkConfig(
+                        backend=args.backend,
+                        num_requests=num_requests,
+                        max_slots=max_slots,
+                        max_new_tokens=max_new_tokens,
+                        block_size_tokens=block_size_tokens,
+                        total_kv_blocks=args.total_kv_blocks,
+                        dtype=args.dtype,
+                        device=args.device,
+                        prompt_set=args.prompt_set,
+                    )
+                )
+
+    return configs
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="custom-cuda-paged",
+        choices=["custom-cuda-paged"],
+    )
+    parser.add_argument(
+        "--num-requests",
+        type=str,
+        default="1,2,4",
+        help="Comma-separated request counts, e.g. 1,2,4",
+    )
+    parser.add_argument(
+        "--max-slots",
+        type=int,
+        default=None,
+        help="If omitted, max_slots=num_requests for each run",
+    )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=str,
+        default="8,16,32",
+        help="Comma-separated max_new_tokens values",
+    )
+    parser.add_argument(
+        "--block-size-tokens",
+        type=str,
+        default="16",
+        help="Comma-separated block sizes, e.g. 4,8,16,32",
+    )
+    parser.add_argument("--total-kv-blocks", type=int, default=256)
+    parser.add_argument("--dtype", type=str, default="float16")
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--prompt-set", type=str, default="capitals")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("results/benchmarks"),
+    )
+
+    args = parser.parse_args()
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_stem = f"runtime_benchmark_{timestamp}"
+
+    jsonl_path = args.output_dir / f"{output_stem}.jsonl"
+    csv_path = args.output_dir / f"{output_stem}.csv"
+    summary_path = args.output_dir / f"{output_stem}_summary.md"
+
+    configs = build_configs(args)
+
+    rows: list[BenchmarkResult] = []
+
+    for index, config in enumerate(configs, start=1):
+        print(f"[{index}/{len(configs)}] Running {config}")
+
+        row = run_single_benchmark(config)
+        rows.append(row)
+
+        print(
+            "  "
+            f"tokens_per_second={row.tokens_per_second:.2f} "
+            f"backend_ms_median={row.backend_ms_median:.3f} "
+            f"backend_ms_p95={row.backend_ms_p95:.3f} "
+            f"kv_peak_used_blocks={row.kv_peak_used_blocks} "
+            f"correct={row.correctness_passed}"
+        )
+
+    write_jsonl(jsonl_path, rows)
+    write_csv(csv_path, rows)
+    write_summary(summary_path, rows)
+
+    print(f"Wrote JSONL: {jsonl_path}")
+    print(f"Wrote CSV: {csv_path}")
+    print(f"Wrote summary: {summary_path}")
+
+
+if __name__ == "__main__":
+    main()
