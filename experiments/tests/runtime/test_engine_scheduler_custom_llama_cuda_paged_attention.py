@@ -56,7 +56,8 @@ def test_engine_scheduler_runs_custom_llama_cuda_paged_attention_single_request(
 
         snapshot = scheduler.last_decode_batch_snapshot
         if snapshot is not None:
-            assert snapshot["backend"] == "custom-llama-cuda-paged-attention"
+            assert snapshot["backend"] == "custom-llama-cuda-paged-attention-batched"
+            assert snapshot["batched_decode"] is True
             assert snapshot["uses_kv_cache"] is True
             assert snapshot["uses_kv_cache_pool"] is True
             assert snapshot["uses_paged_attention"] is True
@@ -143,7 +144,8 @@ def test_engine_scheduler_runs_custom_llama_cuda_paged_attention_two_requests() 
         if snapshot is not None:
             snapshots.append(snapshot)
 
-            assert snapshot["backend"] == "custom-llama-cuda-paged-attention"
+            assert snapshot["backend"] == "custom-llama-cuda-paged-attention-batched"
+            assert snapshot["batched_decode"] is True
             assert snapshot["uses_kv_cache"] is True
             assert snapshot["uses_kv_cache_pool"] is True
             assert snapshot["uses_paged_attention"] is True
@@ -167,6 +169,15 @@ def test_engine_scheduler_runs_custom_llama_cuda_paged_attention_two_requests() 
     print(f"france_text={france_finished.generated_text!r}")
     print(f"germany_text={germany_finished.generated_text!r}")
     print(f"scheduler_snapshot={scheduler.snapshot()}")
+
+    for request in scheduler.finished:
+        print(
+            f"request_id={request.request_id} "
+            f"status={request.status} "
+            f"error={request.error!r} "
+            f"generated_text={request.generated_text!r} "
+            f"generated_tokens={request.generated_tokens}"
+        )
 
     assert france_finished.status == "finished"
     assert germany_finished.status == "finished"
@@ -255,7 +266,8 @@ def test_engine_scheduler_custom_llama_cuda_paged_attention_multiblock_request()
 
         decode_snapshot = scheduler.last_decode_batch_snapshot
         if decode_snapshot is not None:
-            assert decode_snapshot["backend"] == "custom-llama-cuda-paged-attention"
+            assert decode_snapshot["backend"] == "custom-llama-cuda-paged-attention-batched"
+            assert decode_snapshot["batched_decode"] is True
             assert decode_snapshot["uses_kv_cache"] is True
             assert decode_snapshot["uses_kv_cache_pool"] is True
             assert decode_snapshot["uses_paged_attention"] is True

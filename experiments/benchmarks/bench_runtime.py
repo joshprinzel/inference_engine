@@ -152,8 +152,8 @@ def make_engine(config: BenchmarkConfig) -> CustomLlamaDecodeEngine:
 
 def run_single_benchmark(
         config: BenchmarkConfig,
-        run_kind: str,
-        repeat_index: int) -> BenchmarkResult:
+        run_kind: str = "measured",
+        repeat_index: int = 0) -> BenchmarkResult:
     if config.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA benchmark requested, but CUDA is not available")
 
@@ -319,31 +319,79 @@ def write_csv(path: Path, rows: list[BenchmarkResult]) -> None:
             writer.writerow(asdict(row))
 
 
+def config_key(row: BenchmarkResult) -> tuple[Any, ...]:
+    return (
+        row.backend,
+        row.num_requests,
+        row.max_slots,
+        row.max_new_tokens,
+        row.block_size_tokens,
+        row.total_kv_blocks,
+        row.dtype,
+        row.device,
+        row.prompt_set,
+    )
+
+
+def median_float(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return float(statistics.median(values))
+
+
+def median_int(values: list[int]) -> int:
+    if not values:
+        return 0
+    return int(statistics.median(values))
+
+
 def write_summary(path: Path, rows: list[BenchmarkResult]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    measured_rows = [row for row in rows if row.run_kind == "measured"]
+
+    grouped: dict[tuple[Any, ...], list[BenchmarkResult]] = {}
+
+    for row in measured_rows:
+        grouped.setdefault(config_key(row), []).append(row)
 
     lines = [
         "# Runtime Benchmark Summary",
         "",
         f"Generated at: `{datetime.now().isoformat(timespec='seconds')}`",
         "",
-        "| backend | requests | slots | new tokens | block size | tok/s | backend ms median | backend ms p95 | peak KV blocks | correct |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        f"Measured configurations: `{len(grouped)}`",
+        f"Measured rows: `{len(measured_rows)}`",
+        "",
+        "| backend | requests | slots | new tokens | block size | repeats | tok/s median | tok/s min | tok/s max | backend ms median | backend ms p95 median | peak KV blocks | correct |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
 
-    for row in rows:
+    for _, group in sorted(grouped.items(), key=lambda item: item[0]):
+        representative = group[0]
+
+        tokens_per_second_values = [row.tokens_per_second for row in group]
+        backend_ms_median_values = [row.backend_ms_median for row in group]
+        backend_ms_p95_values = [row.backend_ms_p95 for row in group]
+        kv_peak_values = [row.kv_peak_used_blocks for row in group]
+
+        correctness_passed = all(row.correctness_passed for row in group)
+
         lines.append(
             "| "
-            f"{row.backend} | "
-            f"{row.num_requests} | "
-            f"{row.max_slots} | "
-            f"{row.max_new_tokens} | "
-            f"{row.block_size_tokens} | "
-            f"{row.tokens_per_second:.2f} | "
-            f"{row.backend_ms_median:.3f} | "
-            f"{row.backend_ms_p95:.3f} | "
-            f"{row.kv_peak_used_blocks} | "
-            f"{row.correctness_passed} |"
+            f"{representative.backend} | "
+            f"{representative.num_requests} | "
+            f"{representative.max_slots} | "
+            f"{representative.max_new_tokens} | "
+            f"{representative.block_size_tokens} | "
+            f"{len(group)} | "
+            f"{median_float(tokens_per_second_values):.2f} | "
+            f"{min(tokens_per_second_values):.2f} | "
+            f"{max(tokens_per_second_values):.2f} | "
+            f"{median_float(backend_ms_median_values):.3f} | "
+            f"{median_float(backend_ms_p95_values):.3f} | "
+            f"{median_int(kv_peak_values)} | "
+            f"{correctness_passed} |"
         )
 
     lines.extend(
@@ -351,6 +399,8 @@ def write_summary(path: Path, rows: list[BenchmarkResult]) -> None:
             "",
             "## Notes",
             "",
+            "- Warmup rows are written to JSONL/CSV but excluded from this summary.",
+            "- Summary rows aggregate repeated measured runs by benchmark configuration.",
             "- `total_wall_seconds` is end-to-end scheduler wall time.",
             "- `backend_ms_*` comes from the decode engine's backend timing and includes Python/model/backend work inside `decode_step`.",
             "- `kv_peak_used_blocks` is useful for graphing KV pressure under concurrency.",
@@ -360,8 +410,6 @@ def write_summary(path: Path, rows: list[BenchmarkResult]) -> None:
     )
 
     path.write_text("\n".join(lines), encoding="utf-8")
-
-
 def parse_int_list(raw: str) -> list[int]:
     return [int(x.strip()) for x in raw.split(",") if x.strip()]
 
@@ -432,6 +480,8 @@ def main() -> None:
     parser.add_argument("--dtype", type=str, default="float16")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--prompt-set", type=str, default="capitals")
+    parser.add_argument("--warmup-runs", type=int, default=1)
+    parser.add_argument("--repeat-runs", type=int, default=3)
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -451,20 +501,52 @@ def main() -> None:
 
     rows: list[BenchmarkResult] = []
 
-    for index, config in enumerate(configs, start=1):
-        print(f"[{index}/{len(configs)}] Running {config}")
+    total_runs = len(configs) * (args.warmup_runs + args.repeat_runs)
+    run_counter = 0
 
-        row = run_single_benchmark(config)
-        rows.append(row)
+    for config_index, config in enumerate(configs, start=1):
+        print(f"[config {config_index}/{len(configs)}] {config}")
 
-        print(
-            "  "
-            f"tokens_per_second={row.tokens_per_second:.2f} "
-            f"backend_ms_median={row.backend_ms_median:.3f} "
-            f"backend_ms_p95={row.backend_ms_p95:.3f} "
-            f"kv_peak_used_blocks={row.kv_peak_used_blocks} "
-            f"correct={row.correctness_passed}"
-        )
+        for warmup_index in range(args.warmup_runs):
+            run_counter += 1
+            print(f"  [run {run_counter}/{total_runs}] warmup {warmup_index}")
+
+            row = run_single_benchmark(
+                config=config,
+                run_kind="warmup",
+                repeat_index=warmup_index,
+            )
+            rows.append(row)
+
+            print(
+                "    "
+                f"tokens_per_second={row.tokens_per_second:.2f} "
+                f"backend_ms_median={row.backend_ms_median:.3f} "
+                f"backend_ms_p95={row.backend_ms_p95:.3f} "
+                f"kv_peak_used_blocks={row.kv_peak_used_blocks} "
+                f"correct={row.correctness_passed}"
+            )
+
+        for repeat_index in range(args.repeat_runs):
+            run_counter += 1
+            print(f"  [run {run_counter}/{total_runs}] measured {repeat_index}")
+
+            row = run_single_benchmark(
+                config=config,
+                run_kind="measured",
+                repeat_index=repeat_index,
+            )
+            rows.append(row)
+
+            print(
+                "    "
+                f"tokens_per_second={row.tokens_per_second:.2f} "
+                f"backend_ms_median={row.backend_ms_median:.3f} "
+                f"backend_ms_p95={row.backend_ms_p95:.3f} "
+                f"kv_peak_used_blocks={row.kv_peak_used_blocks} "
+                f"correct={row.correctness_passed}"
+            )
+    
 
     write_jsonl(jsonl_path, rows)
     write_csv(csv_path, rows)

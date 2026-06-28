@@ -13,7 +13,7 @@ from runtime.kv_cache_layout import KVCacheLayout
 from runtime.kv_cache_pool import KVCachePool
 from runtime.attention_backend import AttentionBackend, build_attention_backend
 from runtime.kv_cache_transfer import write_past_key_values_to_pool
-from engines.llama.paged_model import llama_model_decode_with_paged_attention_from_hf_weights
+from engines.llama.paged_model import llama_model_decode_batch_with_paged_attention_from_hf_weights
 
 from engines.llama.cached_model import llama_model_forward_with_kv_cache_from_hf_weights
 
@@ -106,36 +106,23 @@ class CustomLlamaDecodeEngine:
     
     def _build_block_tables_tensor(
             self,
-            request_states: list[RequestState]
+            block_tables: list[list[int]]
     ) -> torch.Tensor:
-        max_blocks = max(len(request_state.block_table or []) for request_state in request_states)
+        max_blocks = max(len(block_table) for block_table in block_tables)
         if max_blocks == 0:
             raise ValueError("Cannot build block_tables tensor with no blocks")
         
-        rows: list[list[int]] = []
-
-        for request_state in request_states:
-            if request_state.block_table is None:
-                raise ValueError(
-                    f"request_state.block_table is None for "
-                    f"request_id={request_state.request_id!r}"
-                )
-            
-            row = list(request_state.block_table)
-            row = row + [-1] * (max_blocks - len(row))
-            rows.append(row)
-        return torch.Tensor(
+        rows = [
+            block_table + [-1] * (max_blocks - len(block_table))
+            for block_table in block_tables
+        ]
+        return torch.tensor(
             rows,
             device=self._device,
             dtype=torch.int32
         )
     
-    def _single_block_table_tensor(self, block_table: list[int]) -> torch.tensor:
-        return torch.tensor(
-            [block_table],
-            device=self._device,
-            dtype=torch.int32
-        )
+    
     
     def init_request_state(self, request_state: RequestState) -> None:
         encoded = self.tokenizer(request_state.prompt, return_tensors="pt")
@@ -180,6 +167,13 @@ class CustomLlamaDecodeEngine:
         outputs: list[RequestDecodeOutput] = []
 
         with torch.inference_mode():
+            input_id_rows: list[torch.Tensor] = []
+            token_positions: list[int] = []
+            block_tables: list[list[int]] = []
+            text_pieces: list[str] = []
+            next_token_ids: list[int] = []
+
+
             for request_state in request_states:
                 if request_state.input_ids is None:
                     raise ValueError(
@@ -220,23 +214,36 @@ class CustomLlamaDecodeEngine:
                     clean_up_tokenization_spaces=False
                 )
 
-                block_tables_tensor = self._single_block_table_tensor(request_state.block_table)
+                input_id_rows.append(next_token)
+                token_positions.append(new_token_position)
+                block_tables.append(request_state.block_table)
+                text_pieces.append(text_piece)
+                next_token_ids.append(next_token_id)
+            
+            batch_input_ids = torch.cat(input_id_rows, dim=0)
+            block_tables_tensor = self._build_block_tables_tensor(block_tables)
 
-                seq_lens = torch.tensor(
-                    [new_token_position + 1],
-                    device=self._device,
-                    dtype=torch.int32
-                )
-                logits = llama_model_decode_with_paged_attention_from_hf_weights(
-                    hf_model=self.model,
-                    input_ids=next_token,
-                    token_position=new_token_position,
-                    block_table=request_state.block_table,
-                    block_tables_tensor=block_tables_tensor,
-                    seq_lens=seq_lens,
-                    kv_cache_pool=self.kv_cache_pool,
-                    attention_backend=self.attention_backend,
-                )
+
+            seq_lens = torch.tensor(
+                [position + 1 for position in token_positions],
+                device=self._device,
+                dtype=torch.int32
+            )
+            
+            logits = llama_model_decode_batch_with_paged_attention_from_hf_weights(
+                hf_model=self.model,
+                input_ids=batch_input_ids,
+                token_positions=token_positions,
+                block_tables=block_tables,
+                block_tables_tensor=block_tables_tensor,
+                seq_lens=seq_lens,
+                kv_cache_pool=self.kv_cache_pool,
+                attention_backend=self.attention_backend
+            )
+
+            for batch_index, request_state in enumerate(request_states):
+                next_token_id = next_token_ids[batch_index]
+                text_piece = text_pieces[batch_index]
 
                 reached_eos = (
                     self.tokenizer.eos_token_id is not None
@@ -250,7 +257,7 @@ class CustomLlamaDecodeEngine:
                     request_state.next_token = None
                 else:
                     request_state.next_token = torch.argmax(
-                        logits[:,-1,:],
+                        logits[batch_index : batch_index + 1,-1,:],
                         dim=-1,
                         keepdim=True,
                     )
@@ -267,12 +274,13 @@ class CustomLlamaDecodeEngine:
             request_outputs=outputs,
             backend_ms=backend_ms,
             decode_batch_snapshot={
-                "backend": "custom-llama-cuda-paged-attention",
+                "backend": "custom-llama-cuda-paged-attention-batched",
                 "num_requests": len(request_states),
                 "uses_kv_cache": True,
                 "uses_kv_cache_pool": True,
                 "uses_paged_attention": True,
                 "attention_backend": self.attention_backend_name,
+                "batched_decode": True,
                 "kv_block_manager_present": kv_block_manager is not None,
             },
         )

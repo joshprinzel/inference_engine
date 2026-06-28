@@ -67,7 +67,8 @@ def test_custom_llama_decode_engine_uses_cuda_paged_attention_single_step() -> N
     assert request_state.next_token is not None
     assert int(request_state.next_token.item()) == 29889  # "."
 
-    assert output.decode_batch_snapshot["backend"] == "custom-llama-cuda-paged-attention"
+    assert output.decode_batch_snapshot["backend"] == "custom-llama-cuda-paged-attention-batched"
+    assert output.decode_batch_snapshot["batched_decode"] == True
     assert output.decode_batch_snapshot["uses_kv_cache"] is True
     assert output.decode_batch_snapshot["uses_kv_cache_pool"] is True
     assert output.decode_batch_snapshot["uses_paged_attention"] is True
