@@ -11,40 +11,14 @@ import streamlit as st
 
 from experiments.dashboard.playground_views import render_runtime_playground
 from experiments.dashboard.benchmark_views import render_benchmark_explorer
+from experiments.dashboard.architecture_views import render_architecture_trace
+from experiments.dashboard.kv_views import render_kv_cache_inspector
 from experiments.dashboard.styles import inject_global_styles, render_hero
 
 
-def render_kv_placeholder() -> None:
-    st.header("KV Cache Inspector")
-    st.info(
-        "Next step: visualize KV blocks, request block tables, and block-size tradeoffs."
-    )
 
 
-def render_architecture_placeholder() -> None:
-    st.header("Architecture Trace")
 
-    st.markdown(
-        """
-        ```text
-        User Prompt
-          ↓
-        RequestQueue
-          ↓
-        EngineScheduler
-          ├── admission control
-          ├── KV block allocation
-          └── decode batch construction
-          ↓
-        CustomLlamaDecodeEngine
-          ├── batched TinyLlama decode
-          ├── KVCachePool writes
-          └── CUDA paged attention
-          ↓
-        Response + Metrics
-        ```
-        """
-    )
 
 
 def main() -> None:
@@ -73,10 +47,10 @@ def main() -> None:
         render_benchmark_explorer()
 
     with tab_kv:
-        render_kv_placeholder()
+        render_kv_cache_inspector()
 
     with tab_architecture:
-        render_architecture_placeholder()
+        render_architecture_trace()
 
 
 if __name__ == "__main__":

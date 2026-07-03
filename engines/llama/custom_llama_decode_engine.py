@@ -24,18 +24,7 @@ DEFAULT_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 class CustomLlamaDecodeEngine:
     """
-    First custom Llama DecodeEngine.
-
-    This version is correctness-first:
-
-        - uses TinyLlama weights/tokenizer from Hugging Face
-        - uses our custom llama_model_forward path
-        - recomputes the full sequence every decode step
-        - does not use KVCachePool yet
-        - does not use CUDA paged attention yet
-
-    This is intentionally inefficient. The purpose is to prove that the existing
-    EngineScheduler can drive real token generation through our custom Llama math.
+    Custom Llama DecodeEngine.
     """
 
     def __init__(
