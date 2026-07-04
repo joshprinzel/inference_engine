@@ -12,6 +12,7 @@ from runtime.kv_block_manager import KVBlockManager
 from runtime.metrics_store import MetricsStore
 from runtime.request_queue import RequestQueue
 from runtime.request_state import RequestState
+from runtime.scheduling_policy import FCFSPolicy
 from engines.synthetic_cuda_decode_engine import SyntheticCudaDecodeEngine
 
 
@@ -54,6 +55,9 @@ def main() -> None:
         max_slots=max_slots,
     )
 
+    assert isinstance(scheduler.scheduling_policy, FCFSPolicy)
+    assert scheduler.scheduling_policy.name == "fcfs"
+
     for i in range(max_slots):
         request_queue.put(
             RequestState(
@@ -70,6 +74,8 @@ def main() -> None:
 
     snapshot = scheduler.snapshot()
     print(snapshot)
+
+    assert snapshot["policy_name"] == "fcfs"
 
     assert len(scheduler.finished) == max_slots
 
@@ -98,9 +104,6 @@ def main() -> None:
         assert request_state.generated_text == "<tok1><tok2><tok3><tok4>"
 
     print("passed")
-
-
-
 
 
 def test_engine_scheduler_synthetic_cuda_smoke() -> None:

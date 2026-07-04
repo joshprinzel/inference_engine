@@ -11,6 +11,7 @@ from experiments.dashboard.runtime_playground import (
     run_tinyllama_request_with_engine,
 )
 from experiments.dashboard.styles import render_status_badges
+from runtime.scheduling_policy import DecodeBudgetPolicy, FCFSPolicy, SchedulingPolicy
 
 
 PRESET_PROMPTS = {
@@ -30,13 +31,15 @@ MULTI_PROMPT_PRESETS = [
 
 
 def render_multi_prompt_metric_cards(result: MultiPromptPlaygroundResult) -> None:
-    cols = st.columns(6)
-    cols[0].metric("Tokens/sec", f"{result.tokens_per_second:.2f}")
-    cols[1].metric("Generated tokens", str(result.tokens_generated))
-    cols[2].metric("Backend median", f"{result.backend_ms_median:.3f} ms")
-    cols[3].metric("Backend p95", f"{result.backend_ms_p95:.3f} ms")
-    cols[4].metric("Decode steps", str(result.decode_iterations))
-    cols[5].metric("Peak KV blocks", str(result.kv_peak_used_blocks))
+    cols = st.columns(7)
+    policy_display = result.policy_name.replace("decode_budget_", "budget_")
+    cols[0].metric("Policy", policy_display)
+    cols[1].metric("Tokens/sec", f"{result.tokens_per_second:.2f}")
+    cols[2].metric("Generated tokens", str(result.tokens_generated))
+    cols[3].metric("Backend median", f"{result.backend_ms_median:.3f} ms")
+    cols[4].metric("Backend p95", f"{result.backend_ms_p95:.3f} ms")
+    cols[5].metric("Decode steps", str(result.decode_iterations))
+    cols[6].metric("Peak KV blocks", str(result.kv_peak_used_blocks))
 
 
 def render_multi_prompt_results(result: MultiPromptPlaygroundResult) -> None:
@@ -72,6 +75,7 @@ def render_multi_prompt_results(result: MultiPromptPlaygroundResult) -> None:
     with st.expander("Multi-prompt runtime details"):
         st.json(
             {
+                "Policy": result.policy_name,
                 "max_new_tokens": result.max_new_tokens,
                 "block_size_tokens": result.block_size_tokens,
                 "total_kv_blocks": result.total_kv_blocks,
@@ -96,6 +100,20 @@ def parse_dtype(dtype_name: str) -> torch.dtype:
         return torch.float32
     
     raise ValueError(f"Unsupported dtype: {dtype_name}")
+
+def build_scheduling_policy(
+        *,
+        scheduling_policy_name:str,
+        max_decode_batch_size: int,
+) -> SchedulingPolicy:
+    if scheduling_policy_name == "fcfs":
+        return FCFSPolicy()
+
+    if scheduling_policy_name == "decode_budget":
+        return DecodeBudgetPolicy(
+            max_decode_batch_size=max_decode_batch_size
+        )
+    raise ValueError(f"Unsupported scheduling policy: {scheduling_policy_name}")
 
 
 
@@ -132,6 +150,21 @@ def render_playground_controls() -> dict:
         step=1
     )
 
+    scheduling_policy_name = st.sidebar.selectbox(
+        "Scheduling policy",
+        options=["fcfs", "decode_budget"],
+        index=0
+    )
+
+    max_decode_batch_size = st.sidebar.number_input(
+        "Max decode batch size",
+        min_value=1,
+        max_value=16,
+        value=4,
+        step=1,
+        disabled=scheduling_policy_name != "decode_budget"
+    )
+
     dtype_name = st.sidebar.selectbox(
         "DType",
         options=["float16","bfloat16","float32"],
@@ -155,6 +188,8 @@ def render_playground_controls() -> dict:
         "block_size_tokens": int(block_size_tokens),
         "total_kv_blocks": int(total_kv_blocks),
         "max_slots": int(max_slots),
+        "scheduling_policy_name": scheduling_policy_name,
+        "max_decode_batch_size": int(max_decode_batch_size),
         "dtype": parse_dtype(dtype_name),
         "dtype_name": dtype_name,
         "device": device,
@@ -176,14 +211,16 @@ def render_prompt_preset_controls() -> str | None:
     return preset_prompt
 
 def render_metric_cards(result: PlaygroundResult) -> None:
-    cols = st.columns(6)
+    cols = st.columns(7)
 
-    cols[0].metric("Tokens/sec",f"{result.tokens_per_second:.2f}")
-    cols[1].metric("Generated Tokens", str(result.tokens_generated))
-    cols[2].metric("Backend median", f"{result.backend_ms_median:.3f} ms")
-    cols[3].metric("Backend p95", f"{result.backend_ms_p95:.3f} ms")
-    cols[4].metric("Decode steps", str(result.decode_iterations))
-    cols[5].metric("Peak KV Blocks", str(result.kv_peak_used_blocks))
+    policy_display = result.policy_name.replace("decode_budget_", "budget_")    
+    cols[0].metric("Policy", policy_display)
+    cols[1].metric("Tokens/sec",f"{result.tokens_per_second:.2f}")
+    cols[2].metric("Generated Tokens", str(result.tokens_generated))
+    cols[3].metric("Backend median", f"{result.backend_ms_median:.3f} ms")
+    cols[4].metric("Backend p95", f"{result.backend_ms_p95:.3f} ms")
+    cols[5].metric("Decode steps", str(result.decode_iterations))
+    cols[6].metric("Peak KV Blocks", str(result.kv_peak_used_blocks))
 
 
 def infer_runtime_flags(result: PlaygroundResult) -> tuple[bool,bool,bool]:
@@ -209,7 +246,7 @@ def render_result_details(result: PlaygroundResult) -> None:
 
     with st.expander("Runtime details", expanded=False):
         st.json(
-            {
+            {   "policy":result.prompt,
                 "prompt": result.prompt,
                 "generated_text": result.generated_text,
                 "full_text": result.full_text,
@@ -303,6 +340,11 @@ def render_runtime_playground() -> None:
         attention_backend_name=controls["attention_backend_name"],
     )
 
+    scheduling_policy = build_scheduling_policy(
+        scheduling_policy_name=controls["scheduling_policy_name"],
+        max_decode_batch_size=controls["max_decode_batch_size"]
+    )
+
     single_tab, multi_tab = st.tabs(["Single Prompt", "Multi-Prompt Batch"])
 
     with single_tab:
@@ -346,6 +388,7 @@ def render_runtime_playground() -> None:
                             total_kv_blocks=controls["total_kv_blocks"],
                             max_slots=controls["max_slots"],
                             device=controls["device"],
+                            scheduling_policy=scheduling_policy
                         )
                     except Exception as exc:
                         st.error(f"Runtime failed: {exc!r}")
@@ -402,6 +445,7 @@ def render_runtime_playground() -> None:
                         total_kv_blocks=controls["total_kv_blocks"],
                         max_slots=max(controls["max_slots"], prompt_count),
                         device=controls["device"],
+                        scheduling_policy=scheduling_policy
                     )
                 except Exception as exc:
                     st.error(f"Multi-prompt runtime failed: {exc!r}")

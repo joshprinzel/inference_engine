@@ -12,6 +12,7 @@ from runtime.kv_block_manager import KVBlockManager
 from runtime.metrics_store import MetricsStore
 from runtime.request_queue import RequestQueue
 from runtime.request_state import RequestState
+from runtime.scheduling_policy import SchedulingPolicy
 
 @dataclass(frozen=True)
 class PlaygroundResult:
@@ -26,6 +27,7 @@ class PlaygroundResult:
     block_size_tokens: int
     total_kv_blocks: int
     max_slots: int
+    policy_name: str
 
     tokens_per_second: float
     total_wall_seconds: float
@@ -62,6 +64,7 @@ class MultiPromptPlaygroundResult:
     block_size_tokens: int
     total_kv_blocks: int
     max_slots: int
+    policy_name: str
     tokens_generated: int
     tokens_per_second: float
     total_wall_seconds: float
@@ -117,6 +120,7 @@ def run_tinyllama_request_with_engine(
     total_kv_blocks: int,
     max_slots: int,
     device: str,
+    scheduling_policy: SchedulingPolicy | None = None
 ) -> PlaygroundResult:
     if device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested, but CUDA is not available")
@@ -140,6 +144,7 @@ def run_tinyllama_request_with_engine(
         metrics_store=metrics_store,
         kv_block_manager=kv_block_manager,
         max_slots=max_slots,
+        scheduling_policy=scheduling_policy,
     )
 
     request_state = RequestState(
@@ -228,6 +233,7 @@ def run_tinyllama_request_with_engine(
         block_size_tokens=block_size_tokens,
         total_kv_blocks=total_kv_blocks,
         max_slots=max_slots,
+        policy_name=str(final_snapshot["policy_name"]),
 
         tokens_per_second=tokens_per_second,
         total_wall_seconds=total_wall_seconds,
@@ -288,6 +294,7 @@ def run_tinyllama_multi_prompt_with_engine(
     block_size_tokens: int,
     total_kv_blocks: int,
     max_slots: int,
+    scheduling_policy: SchedulingPolicy | None = None,
     device: str,
 ) -> MultiPromptPlaygroundResult:
     if not prompts:
@@ -313,7 +320,8 @@ def run_tinyllama_multi_prompt_with_engine(
         request_queue=request_queue,
         metrics_store=metrics_store,
         kv_block_manager=kv_block_manager,
-        max_slots=max_slots
+        max_slots=max_slots,
+        scheduling_policy=scheduling_policy
     )
 
     for index, prompt in enumerate(prompts):
@@ -371,7 +379,7 @@ def run_tinyllama_multi_prompt_with_engine(
             break
 
     if device == "cuda":
-        torch.cuda.synchronize
+        torch.cuda.synchronize()
 
     total_wall_seconds = time.perf_counter() - start
 
@@ -430,6 +438,7 @@ def run_tinyllama_multi_prompt_with_engine(
         block_size_tokens=block_size_tokens,
         total_kv_blocks=total_kv_blocks,
         max_slots=max_slots,
+        policy_name=str(final_snapshot["policy_name"]),
         tokens_generated=tokens_generated,
         tokens_per_second=tokens_per_second,
         total_wall_seconds=total_wall_seconds,

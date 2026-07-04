@@ -10,6 +10,7 @@ from .decode_engine import DecodeEngine, DecodeStepOutput
 from .kv_block_manager import KVBlockAllocationError, KVBlockManager
 from .request_queue import RequestQueue
 from .request_state import RequestState
+from .scheduling_policy import FCFSPolicy, SchedulingPolicy, DecodeBudgetPolicy
 
 
 class EngineScheduler:
@@ -43,6 +44,7 @@ class EngineScheduler:
         metrics_store: MetricsStore,
         kv_block_manager: KVBlockManager,
         max_slots: int = 4,
+        scheduling_policy: SchedulingPolicy | None = None,
         step_sleep_seconds: float = 0.0,
         idle_sleep_seconds: float = 0.01,
     ) -> None:
@@ -50,6 +52,7 @@ class EngineScheduler:
         self.request_queue = request_queue
         self.metrics_store = metrics_store
         self.kv_block_manager = kv_block_manager
+        self.scheduling_policy = scheduling_policy or FCFSPolicy()
 
         self.max_slots = max_slots
         self.step_sleep_seconds = step_sleep_seconds
@@ -126,6 +129,7 @@ class EngineScheduler:
             return {
                 "engine_step": self.engine_step,
                 "scheduler_type": "engine_agnostic_continuous_slots",
+                "policy_name": self.scheduling_policy.name,
                 "engine": type(self.decode_engine).__name__,
                 "waiting": len(self.waiting),
                 "active": self.occupied_slot_count(),
@@ -177,40 +181,63 @@ class EngineScheduler:
 
             request_state.status = "waiting"
             self.waiting.append(request_state)
+    
+    def remove_from_waiting(self, request_state: RequestState) -> bool:
+        for index, waiting_request in enumerate(self.waiting):
+            if waiting_request is request_state:
+                self.waiting.pop(index)
+                return True
+        return False
 
     def admit_waiting_requests(self) -> None:
         while self.waiting and self.has_free_slot():
+            available_slots = self.max_slots - self.occupied_slot_count()
+
+            selected_requests = self.scheduling_policy.select_admission(
+                waiting=list(self.waiting),
+                active=self.active_request_states(),
+                available_slots=available_slots,
+                kv_block_manager=self.kv_block_manager,
+                decode_engine=self.decode_engine
+            )
+
+            if not selected_requests:
+                return
+            
+            request_state = selected_requests[0]
+
+            if not self.remove_from_waiting(request_state):
+                raise RuntimeError(
+                    f"Scheduling policy selected request_id={request_state.request_id!r} that is not currently waiting"
+                )
+            
             slot_index = self.first_free_slot_index()
             if slot_index is None:
+                self.waiting.insert(0, request_state)
                 return
-
-            request_state = self.waiting.pop(0)
+            
             request_state.mark_admitted()
 
             try:
                 prompt_tokens = self.decode_engine.count_prompt_tokens(
                     request_state.prompt
                 )
-                reserved_tokens = prompt_tokens + request_state.max_new_tokens
 
+                reserved_tokens = prompt_tokens + request_state.max_new_tokens
                 if not self.kv_block_manager.can_allocate_tokens(reserved_tokens):
                     request_state.status = "waiting"
                     self.waiting.insert(0, request_state)
                     return
-
+                
                 request_id = str(request_state.request_id)
-
-                block_table = self.kv_block_manager.allocate_for_tokens(
-                    request_id=request_id,
-                    num_tokens=prompt_tokens,
-                )
+                block_table = self.kv_block_manager.allocate_for_tokens(request_id=request_id, num_tokens=prompt_tokens)
 
                 request_state.block_table = block_table
                 request_state.prompt_tokens = prompt_tokens
 
                 self.decode_engine.init_request_state(request_state)
                 request_state.num_computed_tokens = request_state.prompt_tokens
-
+            
             except Exception as error:
                 self.kv_block_manager.free(str(request_state.request_id))
                 request_state.mark_failed(error)
@@ -220,9 +247,11 @@ class EngineScheduler:
 
             if self.occupied_slot_count() > 0:
                 self.late_admissions += 1
-
+            
             self.slots[slot_index] = request_state
             self.admitted_count += 1
+
+
 
     # -------------------------------------------------------------------------
     # Decode
@@ -261,16 +290,25 @@ class EngineScheduler:
             if stalled:
                 self.evict_one_stalled_request(stalled)
             return
+        
+        decode_batch = self.scheduling_policy.select_decode_batch(
+            active=runnable,
+            kv_block_manager=self.kv_block_manager,
+            max_batch_size=None
+        )
+
+        if not decode_batch:
+            self.decode_stalls += 1
 
         try:
             output = self.decode_engine.decode_step(
-                request_states=runnable,
+                request_states=decode_batch,
                 kv_block_manager=self.kv_block_manager,
             )
             self.apply_decode_output(output)
 
         except Exception as error:
-            for request_state in runnable:
+            for request_state in decode_batch:
                 self.fail_request(request_state, error)
 
     def apply_decode_output(self, output: DecodeStepOutput) -> None:
