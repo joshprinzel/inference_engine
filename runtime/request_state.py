@@ -35,7 +35,8 @@ class RequestState:
     num_computed_tokens: int = 0
 
     def mark_admitted(self) -> None:
-        self.admit_time = time.perf_counter()
+        if self.admit_time is None:
+            self.admit_time = time.perf_counter()
         self.status = "prefill"
     
     def mark_decoding(self) -> None:
@@ -51,7 +52,8 @@ class RequestState:
         self.output_queue.put(text)
 
     def mark_finished(self) -> None:
-        self.finish_time = time.perf_counter()
+        if self.finish_time is None:
+            self.finish_time = time.perf_counter()
         self.status = "finished"
         self.output_queue.put(None)
     
@@ -62,7 +64,8 @@ class RequestState:
         self.output_queue.put(None)
     
     def mark_failed(self, error: Exception) -> None:
-        self.finish_time = time.perf_counter()
+        if self.finish_time is None:
+            self.finish_time = time.perf_counter()
         self.status = "failed"
         self.error = repr(error)
         self.output_queue.put(None)
@@ -75,20 +78,54 @@ class RequestState:
     def generated_text(self) -> str:
         return "".join(self.generated_text_parts)
     
+    @staticmethod
+    def _seconds_to_ms(value: float | None) -> float | None:
+        if value is None:
+            return None
+        return value * 1000.0
+    
     @property
-    def queue_wait_seconds(self) -> float:
+    def queue_wait_seconds(self) -> float | None:
         if self.admit_time is None:
-            return 0.0
+            return None
         return self.admit_time - self.arrival_time
-    
+
     @property
-    def ttft_seconds(self) -> float:
+    def ttft_seconds(self) -> float | None:
         if self.first_token_time is None:
-            return 0.0
+            return None
         return self.first_token_time - self.arrival_time
-    
+
     @property
-    def latency_seconds(self) -> float:
+    def decode_latency_seconds(self) -> float | None:
+        if self.first_token_time is None or self.finish_time is None:
+            return None
+        return self.finish_time - self.first_token_time
+
+    @property
+    def latency_seconds(self) -> float | None:
         if self.finish_time is None:
-            return 0.0
+            return None
         return self.finish_time - self.arrival_time
+
+    @staticmethod
+    def _seconds_to_ms(value: float | None) -> float | None:
+        if value is None:
+            return None
+        return value * 1000.0
+
+    @property
+    def queue_wait_ms(self) -> float | None:
+        return self._seconds_to_ms(self.queue_wait_seconds)
+
+    @property
+    def ttft_ms(self) -> float | None:
+        return self._seconds_to_ms(self.ttft_seconds)
+
+    @property
+    def decode_latency_ms(self) -> float | None:
+        return self._seconds_to_ms(self.decode_latency_seconds)
+
+    @property
+    def latency_ms(self) -> float | None:
+        return self._seconds_to_ms(self.latency_seconds)

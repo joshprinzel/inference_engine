@@ -10,7 +10,7 @@ from experiments.dashboard.benchmark_data import (
     aggregate_medians,
     filter_measured_rows,
     list_benchmark_csvs,
-    load_benchmark_csv,
+    load_benchmark_csvs,
 )
 
 
@@ -32,6 +32,10 @@ def render_benchmark_filters(df: pd.DataFrame) -> pd.DataFrame:
         filtered = filtered[filtered["run_kind"].isin(selected_run_kinds)]
 
     filter_columns = [
+        "matrix_run",
+        "scenario_name",
+        "policy_name",
+        "policy_dir",
         "backend",
         "num_requests",
         "max_slots",
@@ -65,7 +69,7 @@ def render_benchmark_filters(df: pd.DataFrame) -> pd.DataFrame:
 def render_benchmark_metric_cards(df: pd.DataFrame) -> None:
     st.subheader("Benchmark Summary")
 
-    cols = st.columns(6)
+    cols = st.columns(8)
 
     if df.empty:
         for col in cols:
@@ -76,13 +80,18 @@ def render_benchmark_metric_cards(df: pd.DataFrame) -> None:
     if "correctness_passed" in df.columns:
         correctness_rate = 100.0 * float(df["correctness_passed"].mean())
 
+    all_finished_rate = 0.0
+    if "all_finished" in df.columns:
+        all_finished_rate = 100.0 * float(df["all_finished"].mean())
+
     cols[0].metric("Rows", str(len(df)))
     cols[1].metric("Median tok/s", f"{df['tokens_per_second'].median():.2f}")
-    cols[2].metric("Median backend", f"{df['backend_ms_median'].median():.3f} ms")
-    cols[3].metric("Median p95", f"{df['backend_ms_p95'].median():.3f} ms")
-    cols[4].metric("Peak KV blocks", str(int(df["kv_peak_used_blocks"].max())))
-    cols[5].metric("Correctness", f"{correctness_rate:.1f}%")
-
+    cols[2].metric("Median TTFT", f"{df['avg_ttft_ms'].median():.3f} ms")
+    cols[3].metric("Median latency", f"{df['avg_latency_ms'].median():.3f} ms")
+    cols[4].metric("Median backend", f"{df['backend_ms_median'].median():.3f} ms")
+    cols[5].metric("Decode batches", f"{df['decode_batches_built'].median():.0f}")
+    cols[6].metric("Finished", f"{all_finished_rate:.1f}%")
+    cols[7].metric("Correctness", f"{correctness_rate:.1f}%")
 
 def render_line_chart(
     df: pd.DataFrame,
@@ -213,6 +222,10 @@ def render_latency_tab(df: pd.DataFrame) -> None:
     )
 
     latency_columns = [
+        "avg_queue_wait_ms",
+        "avg_ttft_ms",
+        "avg_decode_latency_ms",
+        "avg_latency_ms",
         "backend_ms_median",
         "backend_ms_p95",
         "backend_ms_min",
@@ -227,8 +240,11 @@ def render_latency_tab(df: pd.DataFrame) -> None:
         return
 
     display_columns = [
+        "scenario_name",
+        "policy_name",
         "backend",
         "num_requests",
+        "max_slots",
         "max_new_tokens",
         "block_size_tokens",
         "run_kind",
@@ -237,11 +253,14 @@ def render_latency_tab(df: pd.DataFrame) -> None:
 
     display_columns = [column for column in display_columns if column in df.columns]
 
+    sort_columns = [
+        column
+        for column in ["scenario_name", "policy_name", "num_requests", "max_new_tokens", "block_size_tokens"]
+        if column in df.columns
+    ]
+
     st.dataframe(
-        df[display_columns].sort_values(
-            ["num_requests", "max_new_tokens", "block_size_tokens"],
-            ascending=True,
-        ),
+        df[display_columns].sort_values(sort_columns, ascending=True),
         use_container_width=True,
     )
 
@@ -249,7 +268,98 @@ def render_latency_tab(df: pd.DataFrame) -> None:
 def render_raw_data_tab(df: pd.DataFrame) -> None:
     st.dataframe(df, use_container_width=True)
 
+def render_policy_comparison_tab(df: pd.DataFrame) -> None:
+    st.markdown(
+        """
+        Compare scheduler policies across benchmark scenarios. Rows are grouped
+        by scenario and policy, using median values across measured repeats.
+        """
+    )
 
+    measured_df = filter_measured_rows(df)
+
+    if measured_df.empty:
+        st.info("No measured benchmark rows available.")
+        return
+
+    group_columns = [
+        column
+        for column in ["scenario_name", "policy_name", "prompt_set", "num_requests", "max_slots", "max_new_tokens"]
+        if column in measured_df.columns
+    ]
+
+    if not group_columns:
+        st.info("No grouping columns available for policy comparison.")
+        return
+
+    comparison_df = aggregate_medians(
+        measured_df,
+        group_columns=group_columns,
+    )
+
+    if comparison_df.empty:
+        st.info("No comparison data available.")
+        return
+
+    display_columns = [
+        "scenario_name",
+        "policy_name",
+        "prompt_set",
+        "num_requests",
+        "max_slots",
+        "max_new_tokens",
+        "tokens_per_second",
+        "avg_ttft_ms",
+        "avg_latency_ms",
+        "avg_queue_wait_ms",
+        "avg_decode_latency_ms",
+        "decode_batches_built",
+        "backend_ms_median",
+        "backend_ms_p95",
+        "kv_peak_used_blocks",
+        "all_finished_all_passed",
+        "correctness_all_passed",
+    ]
+
+    display_columns = [
+        column
+        for column in display_columns
+        if column in comparison_df.columns
+    ]
+
+    st.dataframe(
+        comparison_df[display_columns].sort_values(
+            ["scenario_name", "policy_name"],
+            ascending=True,
+        ),
+        use_container_width=True,
+    )
+
+    chart_columns = [
+        "tokens_per_second",
+        "avg_ttft_ms",
+        "avg_latency_ms",
+        "decode_batches_built",
+        "kv_peak_used_blocks",
+    ]
+
+    available_chart_columns = [
+        column for column in chart_columns if column in comparison_df.columns
+    ]
+
+    selected_metric = st.selectbox(
+        "Comparison metric",
+        options=available_chart_columns,
+        index=0,
+    )
+
+    if "scenario_name" in comparison_df.columns and "policy_name" in comparison_df.columns:
+        st.bar_chart(
+            comparison_df,
+            x="scenario_name",
+            y=selected_metric,
+            color="policy_name",
+        )
 def render_benchmark_explorer() -> None:
     st.header("Benchmark Explorer")
 
@@ -273,18 +383,29 @@ def render_benchmark_explorer() -> None:
         st.warning(f"No benchmark CSV files found in `{benchmark_dir}`.")
         return
 
-    csv_options = {path.name: path for path in csv_files}
-
-    selected_csv_name = st.selectbox(
-        "Benchmark CSV",
+    csv_options = {
+        str(path.relative_to(benchmark_dir)): path
+        for path in csv_files
+    }
+    selected_csv_names = st.multiselect(
+        "Benchmark CSVs",
         options=list(csv_options.keys()),
+        default=list(csv_options.keys())[: min(12, len(csv_options))]
     )
 
-    selected_csv = csv_options[selected_csv_name]
+    if not selected_csv_names:
+        st.warning("Select at least one benchmark CSV.")
+        return
+    
+    selected_csvs = [csv_options[name] for name in selected_csv_names]
 
-    st.caption(f"Loaded `{selected_csv}`")
+    st.caption(f"Loaded `{len(selected_csvs)}` benchmark CSV file(s).")
 
-    df = load_benchmark_csv(selected_csv)
+    df = load_benchmark_csvs(
+        selected_csvs,
+        benchmark_dir=benchmark_dir
+    )
+
     filtered_df = render_benchmark_filters(df)
 
     if filtered_df.empty:
@@ -293,15 +414,17 @@ def render_benchmark_explorer() -> None:
 
     render_benchmark_metric_cards(filtered_df)
 
-    tab_concurrency, tab_block_size, tab_latency, tab_raw = st.tabs(
+    tab_policy, tab_concurrency, tab_block_size, tab_latency, tab_raw = st.tabs(
         [
+            "Policy Comparison",
             "Concurrency Scaling",
             "Block Size Sensitivity",
             "Latency Table",
             "Raw Rows",
         ]
     )
-
+    with tab_policy:
+        render_policy_comparison_tab(filtered_df) 
     with tab_concurrency:
         render_concurrency_tab(filtered_df)
 

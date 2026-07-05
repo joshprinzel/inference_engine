@@ -29,17 +29,23 @@ MULTI_PROMPT_PRESETS = [
     "The capital of Spain is",
 ]
 
+def format_ms(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.3f} ms"
+
 
 def render_multi_prompt_metric_cards(result: MultiPromptPlaygroundResult) -> None:
-    cols = st.columns(7)
+    cols = st.columns(8)
     policy_display = result.policy_name.replace("decode_budget_", "budget_")
     cols[0].metric("Policy", policy_display)
     cols[1].metric("Tokens/sec", f"{result.tokens_per_second:.2f}")
     cols[2].metric("Generated tokens", str(result.tokens_generated))
-    cols[3].metric("Backend median", f"{result.backend_ms_median:.3f} ms")
-    cols[4].metric("Backend p95", f"{result.backend_ms_p95:.3f} ms")
-    cols[5].metric("Decode steps", str(result.decode_iterations))
-    cols[6].metric("Peak KV blocks", str(result.kv_peak_used_blocks))
+    cols[3].metric("Avg TTFT", format_ms(result.avg_ttft_ms))
+    cols[4].metric("Avg latency", format_ms(result.avg_latency_ms))
+    cols[5].metric("Backend median", f"{result.backend_ms_median:.3f} ms")
+    cols[6].metric("Decode steps", str(result.decode_iterations))
+    cols[7].metric("Peak KV blocks", str(result.kv_peak_used_blocks))
 
 
 def render_multi_prompt_results(result: MultiPromptPlaygroundResult) -> None:
@@ -67,30 +73,59 @@ def render_multi_prompt_results(result: MultiPromptPlaygroundResult) -> None:
             st.markdown("**Generated text**")
             st.code(request_result.generated_text)
 
-            cols = st.columns(3)
+            cols = st.columns(6)
             cols[0].metric("Prompt tokens", str(request_result.prompt_tokens))
             cols[1].metric("Generated tokens", str(request_result.generated_tokens))
-            cols[2].metric("Error", request_result.error or "None")
+            cols[2].metric("TTFT", format_ms(request_result.ttft_ms))
+            cols[3].metric("Latency", format_ms(request_result.latency_ms))
+            cols[4].metric("Queue wait", format_ms(request_result.queue_wait_ms))
+            cols[5].metric("Error", request_result.error or "None")
 
-    with st.expander("Multi-prompt runtime details"):
-        st.json(
-            {
-                "Policy": result.policy_name,
-                "max_new_tokens": result.max_new_tokens,
-                "block_size_tokens": result.block_size_tokens,
-                "total_kv_blocks": result.total_kv_blocks,
-                "max_slots": result.max_slots,
-                "tokens_generated": result.tokens_generated,
-                "decode_iterations": result.decode_iterations,
-                "decode_batches_built": result.decode_batches_built,
-                "kv_peak_used_blocks": result.kv_peak_used_blocks,
-                "kv_final_used_blocks": result.kv_final_used_blocks,
-                "kv_final_free_blocks": result.kv_final_free_blocks,
-                "all_finished": result.all_finished,
-                "last_decode_batch": result.last_decode_batch,
-                "step_trace": result.step_trace,
-            }
-        )
+        with st.expander("Multi-prompt runtime details"):
+            st.json(
+                {
+                    "policy_name": result.policy_name,
+                    "max_new_tokens": result.max_new_tokens,
+                    "block_size_tokens": result.block_size_tokens,
+                    "total_kv_blocks": result.total_kv_blocks,
+                    "max_slots": result.max_slots,
+                    "tokens_generated": result.tokens_generated,
+                    "tokens_per_second": result.tokens_per_second,
+                    "total_wall_seconds": result.total_wall_seconds,
+                    "avg_queue_wait_ms": result.avg_queue_wait_ms,
+                    "avg_ttft_ms": result.avg_ttft_ms,
+                    "avg_decode_latency_ms": result.avg_decode_latency_ms,
+                    "avg_latency_ms": result.avg_latency_ms,
+                    "decode_iterations": result.decode_iterations,
+                    "decode_batches_built": result.decode_batches_built,
+                    "backend_ms_median": result.backend_ms_median,
+                    "backend_ms_p95": result.backend_ms_p95,
+                    "backend_ms_min": result.backend_ms_min,
+                    "backend_ms_max": result.backend_ms_max,
+                    "kv_peak_used_blocks": result.kv_peak_used_blocks,
+                    "kv_final_used_blocks": result.kv_final_used_blocks,
+                    "kv_final_free_blocks": result.kv_final_free_blocks,
+                    "all_finished": result.all_finished,
+                    "last_decode_batch": result.last_decode_batch,
+                    "request_results": [
+                        {
+                            "request_id": request.request_id,
+                            "prompt": request.prompt,
+                            "generated_text": request.generated_text,
+                            "prompt_tokens": request.prompt_tokens,
+                            "generated_tokens": request.generated_tokens,
+                            "final_status": request.final_status,
+                            "error": request.error,
+                            "queue_wait_ms": request.queue_wait_ms,
+                            "ttft_ms": request.ttft_ms,
+                            "decode_latency_ms": request.decode_latency_ms,
+                            "latency_ms": request.latency_ms,
+                        }
+                        for request in result.request_results
+                    ],
+                    "step_trace": result.step_trace,
+                }
+            )
 def parse_dtype(dtype_name: str) -> torch.dtype:
     if dtype_name == "float16":
         return torch.float16
@@ -211,16 +246,17 @@ def render_prompt_preset_controls() -> str | None:
     return preset_prompt
 
 def render_metric_cards(result: PlaygroundResult) -> None:
-    cols = st.columns(7)
+    cols = st.columns(8)
 
-    policy_display = result.policy_name.replace("decode_budget_", "budget_")    
+    policy_display = result.policy_name.replace("decode_budget_", "budget_")
     cols[0].metric("Policy", policy_display)
-    cols[1].metric("Tokens/sec",f"{result.tokens_per_second:.2f}")
+    cols[1].metric("Tokens/sec", f"{result.tokens_per_second:.2f}")
     cols[2].metric("Generated Tokens", str(result.tokens_generated))
-    cols[3].metric("Backend median", f"{result.backend_ms_median:.3f} ms")
-    cols[4].metric("Backend p95", f"{result.backend_ms_p95:.3f} ms")
-    cols[5].metric("Decode steps", str(result.decode_iterations))
-    cols[6].metric("Peak KV Blocks", str(result.kv_peak_used_blocks))
+    cols[3].metric("TTFT", format_ms(result.ttft_ms))
+    cols[4].metric("Latency", format_ms(result.latency_ms))
+    cols[5].metric("Backend median", f"{result.backend_ms_median:.3f} ms")
+    cols[6].metric("Decode steps", str(result.decode_iterations))
+    cols[7].metric("Peak KV Blocks", str(result.kv_peak_used_blocks))
 
 
 def infer_runtime_flags(result: PlaygroundResult) -> tuple[bool,bool,bool]:
@@ -246,7 +282,8 @@ def render_result_details(result: PlaygroundResult) -> None:
 
     with st.expander("Runtime details", expanded=False):
         st.json(
-            {   "policy":result.prompt,
+            {
+                "policy_name": result.policy_name,
                 "prompt": result.prompt,
                 "generated_text": result.generated_text,
                 "full_text": result.full_text,
@@ -256,6 +293,10 @@ def render_result_details(result: PlaygroundResult) -> None:
                 "tokens_generated": result.tokens_generated,
                 "tokens_per_second": result.tokens_per_second,
                 "total_wall_seconds": result.total_wall_seconds,
+                "queue_wait_ms": result.queue_wait_ms,
+                "ttft_ms": result.ttft_ms,
+                "decode_latency_ms": result.decode_latency_ms,
+                "latency_ms": result.latency_ms,
                 "decode_iterations": result.decode_iterations,
                 "decode_batches_built": result.decode_batches_built,
                 "backend_ms_median": result.backend_ms_median,
@@ -266,7 +307,7 @@ def render_result_details(result: PlaygroundResult) -> None:
                 "kv_final_used_blocks": result.kv_final_used_blocks,
                 "kv_final_free_blocks": result.kv_final_free_blocks,
                 "last_decode_batch": result.last_decode_batch,
-                
+                "step_trace": result.step_trace,
             }
         )
 

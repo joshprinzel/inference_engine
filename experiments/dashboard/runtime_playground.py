@@ -29,6 +29,11 @@ class PlaygroundResult:
     max_slots: int
     policy_name: str
 
+    queue_wait_ms: float | None
+    ttft_ms: float | None
+    decode_latency_ms: float | None
+    latency_ms: float | None
+
     tokens_per_second: float
     total_wall_seconds: float
     decode_iterations: int
@@ -55,6 +60,10 @@ class MultiPromptRequestResult:
     generated_tokens: int
     final_status: str
     error: str | None
+    queue_wait_ms: float | None
+    ttft_ms: float | None
+    decode_latency_ms: float | None
+    latency_ms: float | None
 
 
 @dataclass(frozen=True)
@@ -68,6 +77,12 @@ class MultiPromptPlaygroundResult:
     tokens_generated: int
     tokens_per_second: float
     total_wall_seconds: float
+
+    avg_queue_wait_ms: float | None
+    avg_ttft_ms: float | None
+    avg_decode_latency_ms: float | None
+    avg_latency_ms: float | None
+
     decode_iterations: int
     decode_batches_built: int
     backend_ms_median: float
@@ -92,6 +107,12 @@ def percentile(values: list[float], p: float) -> float:
     sorted_values = sorted(values)
     index = int(round((p/100.0) * (len(sorted_values) - 1)))
     return sorted_values[index]
+
+def mean_optional(values: list[float | None]) -> float | None:
+    present_values = [value for value in values if value is not None]
+    if not present_values:
+        return None
+    return sum(present_values) / len(present_values)
 
 def create_playground_engine(
         *,
@@ -234,6 +255,11 @@ def run_tinyllama_request_with_engine(
         total_kv_blocks=total_kv_blocks,
         max_slots=max_slots,
         policy_name=str(final_snapshot["policy_name"]),
+
+        queue_wait_ms=finished_request.queue_wait_ms,
+        ttft_ms=finished_request.ttft_ms,
+        decode_latency_ms=finished_request.decode_latency_ms,
+        latency_ms=finished_request.latency_ms,
 
         tokens_per_second=tokens_per_second,
         total_wall_seconds=total_wall_seconds,
@@ -407,7 +433,11 @@ def run_tinyllama_multi_prompt_with_engine(
                     prompt_tokens=0,
                     generated_tokens=0,
                     final_status="not_finished",
-                    error="Request did not finish within scheduler step limit"
+                    error="Request did not finish within scheduler step limit",
+                    queue_wait_ms=None,
+                    ttft_ms=None,
+                    decode_latency_ms=None,
+                    latency_ms=None
                 )
             )
             continue
@@ -423,13 +453,23 @@ def run_tinyllama_multi_prompt_with_engine(
                 prompt_tokens=int(finished_request.prompt_tokens),
                 generated_tokens=int(finished_request.generated_tokens),
                 final_status=finished_request.status,
-                error=repr(finished_request.error) if finished_request.error else None
+                error=repr(finished_request.error) if finished_request.error else None,
+                queue_wait_ms=finished_request.queue_wait_ms,
+                ttft_ms=finished_request.ttft_ms,
+                decode_latency_ms=finished_request.decode_latency_ms,
+                latency_ms=finished_request.latency_ms
             )
         )
 
     
     tokens_generated = int(scheduler.tokens_generated)
     tokens_per_second = (tokens_generated / total_wall_seconds if total_wall_seconds > 0 else 0.0)
+
+    avg_queue_wait_ms = mean_optional([request.queue_wait_ms for request in request_results])
+    avg_ttft_ms = mean_optional([request.ttft_ms for request in request_results])
+    avg_decode_latency_ms = mean_optional([request.decode_latency_ms for request in request_results])
+    avg_latency_ms = mean_optional([request.latency_ms for request in request_results])
+
 
 
     return MultiPromptPlaygroundResult(
@@ -442,6 +482,12 @@ def run_tinyllama_multi_prompt_with_engine(
         tokens_generated=tokens_generated,
         tokens_per_second=tokens_per_second,
         total_wall_seconds=total_wall_seconds,
+
+        avg_queue_wait_ms=avg_queue_wait_ms,
+        avg_ttft_ms=avg_ttft_ms,
+        avg_decode_latency_ms=avg_decode_latency_ms,
+        avg_latency_ms=avg_latency_ms,
+        
         decode_iterations=int(final_snapshot["decode_iterations"]),
         decode_batches_built=int(final_snapshot["decode_batches_built"]),
         backend_ms_median=statistics.median(backend_ms_values)

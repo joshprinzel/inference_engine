@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import statistics
+import math
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -18,14 +19,12 @@ from runtime.kv_block_manager import KVBlockManager
 from runtime.metrics_store import MetricsStore
 from runtime.request_queue import RequestQueue
 from runtime.request_state import RequestState
+from runtime.scheduling_policy import DecodeBudgetPolicy, FCFSPolicy, SchedulingPolicy
+
+from experiments.benchmarks.workloads import build_workload
 
 
-DEFAULT_PROMPTS = {
-    "france": "The capital of France is",
-    "germany": "The capital of Germany is",
-    "italy": "The capital of Italy is",
-    "spain": "The capital of Spain is",
-}
+
 
 
 @dataclass(frozen=True)
@@ -39,6 +38,8 @@ class BenchmarkConfig:
     dtype: str
     device: str
     prompt_set: str
+    scheduling_policy_name: str
+    max_decode_batch_size: int
 
 
 @dataclass(frozen=True)
@@ -56,9 +57,17 @@ class BenchmarkResult:
     device: str
     prompt_set: str
 
+    policy_name: str
+    max_decode_batch_size: int
+
     total_wall_seconds: float
     tokens_generated: int
     tokens_per_second: float
+
+    avg_queue_wait_ms: float | None
+    avg_ttft_ms: float | None
+    avg_decode_latency_ms: float | None
+    avg_latency_ms: float | None
 
     decode_iterations: int
     decode_batches_built: int
@@ -82,7 +91,9 @@ class BenchmarkResult:
 
     all_finished: bool
     generated_text_by_request: str
+    generated_tokens_by_request: str
     expected_text_by_request: str
+    max_new_tokens_by_request: str
     correctness_passed: bool
 
 
@@ -109,29 +120,7 @@ def percentile(values: list[float], p: float) -> float:
     return sorted_values[index]
 
 
-def build_prompts(num_requests: int, prompt_set: str) -> list[tuple[str, str, str]]:
-    if prompt_set != "capitals":
-        raise ValueError(f"Unsupported prompt_set: {prompt_set}")
 
-    items = list(DEFAULT_PROMPTS.items())
-
-    requests: list[tuple[str, str, str]] = []
-
-    for i in range(num_requests):
-        name, prompt = items[i % len(items)]
-        request_id = f"req-{i}-{name}"
-
-        expected_prefix_by_name = {
-            "france": "Paris",
-            "germany": "Berlin",
-            "italy": "Rome",
-            "spain": "Madrid",
-        }
-
-        expected_prefix = expected_prefix_by_name[name]
-        requests.append((request_id, prompt, expected_prefix))
-
-    return requests
 
 
 def make_engine(config: BenchmarkConfig) -> CustomLlamaDecodeEngine:
@@ -148,6 +137,19 @@ def make_engine(config: BenchmarkConfig) -> CustomLlamaDecodeEngine:
         total_kv_blocks=config.total_kv_blocks,
         block_size_tokens=config.block_size_tokens,
     )
+
+def build_scheduling_policy(
+        *,
+        scheduling_policy_name: str,
+        max_decode_batch_size: int,
+) -> SchedulingPolicy:
+    if scheduling_policy_name == "fcfs":
+        return FCFSPolicy()
+    
+    if scheduling_policy_name == "decode_budget":
+        return DecodeBudgetPolicy(max_decode_batch_size=max_decode_batch_size)
+    
+    raise ValueError(f"Unsupported scheduling policy: {scheduling_policy_name}")
 
 
 def run_single_benchmark(
@@ -170,38 +172,54 @@ def run_single_benchmark(
         block_size_tokens=config.block_size_tokens,
     )
 
+    scheduling_policy = build_scheduling_policy(
+        scheduling_policy_name=config.scheduling_policy_name,
+        max_decode_batch_size=config.max_decode_batch_size
+    )
+
     scheduler = EngineScheduler(
         decode_engine=engine,
         request_queue=request_queue,
         metrics_store=metrics_store,
         kv_block_manager=kv_block_manager,
         max_slots=config.max_slots,
+        scheduling_policy=scheduling_policy
     )
 
-    prompt_specs = build_prompts(
-        num_requests=config.num_requests,
+    request_specs = build_workload(
         prompt_set=config.prompt_set,
+        num_requests=config.num_requests,
+        max_new_tokens=config.max_new_tokens
     )
 
     expected_text_by_request: dict[str, str] = {}
+    max_new_tokens_by_request: dict[str, int] = {}
 
-    for request_id, prompt, expected_prefix in prompt_specs:
+    for request_spec in request_specs:
         request_state = RequestState(
-            request_id=request_id,
-            prompt=prompt,
-            max_new_tokens=config.max_new_tokens,
+            request_id=request_spec.request_id,
+            prompt=request_spec.prompt,
+            max_new_tokens=request_spec.max_new_tokens,
         )
 
         request_queue.put(request_state)
 
         # We only require the prefix because tokenization/newline tails can vary
         # once max_new_tokens changes.
-        expected_text_by_request[request_id] = expected_prefix
+        expected_text_by_request[request_spec.request_id] = request_spec.expected_prefix
+        max_new_tokens_by_request[request_spec.request_id] = request_spec.max_new_tokens
 
     backend_ms_values: list[float] = []
     kv_used_blocks_values: list[int] = []
 
-    max_steps = config.max_new_tokens + config.num_requests + 16
+    max_request_new_tokens = max(
+        request_spec.max_new_tokens for request_spec in request_specs
+    )
+
+    slot_waves = math.ceil(config.num_requests / max(1, config.max_slots))
+    max_steps = (
+        max_request_new_tokens * slot_waves + config.num_requests + 16
+    )
 
     if config.device == "cuda":
         torch.cuda.synchronize()
@@ -227,9 +245,15 @@ def run_single_benchmark(
 
     final_snapshot = scheduler.snapshot()
     kv_snapshot = scheduler.kv_block_manager.snapshot()
+    metrics_snapshot = metrics_store.snapshot()
 
     generated_text_by_request = {
         request.request_id: request.generated_text
+        for request in scheduler.finished
+    }
+
+    generated_tokens_by_request = {
+        request.request_id: int(request.generated_tokens)
         for request in scheduler.finished
     }
 
@@ -258,9 +282,19 @@ def run_single_benchmark(
         dtype=config.dtype,
         device=config.device,
         prompt_set=config.prompt_set,
+
+        policy_name=str(final_snapshot["policy_name"]),
+        max_decode_batch_size=config.max_decode_batch_size,
+
         total_wall_seconds=total_wall_seconds,
         tokens_generated=tokens_generated,
         tokens_per_second=tokens_per_second,
+
+        avg_queue_wait_ms=metrics_snapshot.get("avg_queue_wait_ms"),
+        avg_ttft_ms=metrics_snapshot.get("avg_ttft_ms"),
+        avg_decode_latency_ms=metrics_snapshot.get("avg_decode_latency_ms"),
+        avg_latency_ms=metrics_snapshot.get("avg_latency_ms"),
+
         decode_iterations=int(final_snapshot["decode_iterations"]),
         decode_batches_built=int(final_snapshot["decode_batches_built"]),
         admitted_count=int(final_snapshot["admitted_count"]),
@@ -289,6 +323,14 @@ def run_single_benchmark(
         ),
         expected_text_by_request=json.dumps(
             expected_text_by_request,
+            sort_keys=True,
+        ),
+        max_new_tokens_by_request=json.dumps(
+            max_new_tokens_by_request,
+            sort_keys=True
+        ),
+        generated_tokens_by_request=json.dumps(
+            generated_tokens_by_request,
             sort_keys=True,
         ),
         correctness_passed=correctness_passed,
@@ -330,6 +372,8 @@ def config_key(row: BenchmarkResult) -> tuple[Any, ...]:
         row.dtype,
         row.device,
         row.prompt_set,
+        row.policy_name,
+        row.max_decode_batch_size,
     )
 
 
@@ -337,6 +381,18 @@ def median_float(values: list[float]) -> float:
     if not values:
         return 0.0
     return float(statistics.median(values))
+
+def median_optional_float(values: list[float | None]) -> float | None:
+    present_values = [value for value in values if value is not None]
+    if not present_values:
+        return None
+    return float(statistics.median(present_values))
+
+
+def format_optional_float(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.3f}"
 
 
 def median_int(values: list[int]) -> int:
@@ -363,8 +419,8 @@ def write_summary(path: Path, rows: list[BenchmarkResult]) -> None:
         f"Measured configurations: `{len(grouped)}`",
         f"Measured rows: `{len(measured_rows)}`",
         "",
-        "| backend | requests | slots | new tokens | block size | repeats | tok/s median | tok/s min | tok/s max | backend ms median | backend ms p95 median | peak KV blocks | correct |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| backend | policy | requests | slots | new tokens | block size | repeats | tok/s median | tok/s min | tok/s max | TTFT ms median | latency ms median | backend ms median | backend ms p95 median | peak KV blocks | correct |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
 
     for _, group in sorted(grouped.items(), key=lambda item: item[0]):
@@ -374,12 +430,15 @@ def write_summary(path: Path, rows: list[BenchmarkResult]) -> None:
         backend_ms_median_values = [row.backend_ms_median for row in group]
         backend_ms_p95_values = [row.backend_ms_p95 for row in group]
         kv_peak_values = [row.kv_peak_used_blocks for row in group]
+        ttft_ms_values = [row.avg_ttft_ms for row in group]
+        latency_ms_values = [row.avg_latency_ms for row in group]
 
         correctness_passed = all(row.correctness_passed for row in group)
 
         lines.append(
             "| "
             f"{representative.backend} | "
+            f"{representative.policy_name} | "
             f"{representative.num_requests} | "
             f"{representative.max_slots} | "
             f"{representative.max_new_tokens} | "
@@ -388,6 +447,8 @@ def write_summary(path: Path, rows: list[BenchmarkResult]) -> None:
             f"{median_float(tokens_per_second_values):.2f} | "
             f"{min(tokens_per_second_values):.2f} | "
             f"{max(tokens_per_second_values):.2f} | "
+            f"{format_optional_float(median_optional_float(ttft_ms_values))} | "
+            f"{format_optional_float(median_optional_float(latency_ms_values))} | "
             f"{median_float(backend_ms_median_values):.3f} | "
             f"{median_float(backend_ms_p95_values):.3f} | "
             f"{median_int(kv_peak_values)} | "
@@ -405,6 +466,13 @@ def write_summary(path: Path, rows: list[BenchmarkResult]) -> None:
             "- `backend_ms_*` comes from the decode engine's backend timing and includes Python/model/backend work inside `decode_step`.",
             "- `kv_peak_used_blocks` is useful for graphing KV pressure under concurrency.",
             "- `correctness_passed` checks generated text prefixes for the benchmark prompts.",
+            "- `avg_ttft_ms` is average request time-to-first-token for finished successful requests.",
+            "- `avg_latency_ms` is average end-to-end request latency for finished successful requests.",
+            "- `policy_name` identifies the scheduler policy used for admission/decode selection.",
+            "- `capitals` is the fixed-length correctness/control workload.",
+            "- `mixed_short_long` varies per-request decode length while keeping prompts correctness-checkable.",
+            "- Slot pressure is created by running with `num_requests > max_slots`.",
+            "- `max_new_tokens_by_request` records the per-request decode limit used by synthetic workloads.",
             "",
         ]
     )
@@ -437,6 +505,8 @@ def build_configs(args: argparse.Namespace) -> list[BenchmarkConfig]:
                         dtype=args.dtype,
                         device=args.device,
                         prompt_set=args.prompt_set,
+                        scheduling_policy_name=args.scheduling_policy,
+                        max_decode_batch_size=args.max_decode_batch_size,
                     )
                 )
 
@@ -476,10 +546,23 @@ def main() -> None:
         default="16",
         help="Comma-separated block sizes, e.g. 4,8,16,32",
     )
+
+    parser.add_argument(
+        "--scheduling-policy",
+        type=str,
+        default="fcfs",
+        choices=["fcfs", "decode_budget"],
+    )
+    parser.add_argument(
+        "--max-decode-batch-size",
+        type=int,
+        default=4,
+        help="Used only when --scheduling-policy=decode_budget",
+    )
     parser.add_argument("--total-kv-blocks", type=int, default=256)
     parser.add_argument("--dtype", type=str, default="float16")
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--prompt-set", type=str, default="capitals")
+    parser.add_argument("--prompt-set", type=str, default="capitals", choices=["capitals", "mixed_short_long"])
     parser.add_argument("--warmup-runs", type=int, default=1)
     parser.add_argument("--repeat-runs", type=int, default=3)
     parser.add_argument(
@@ -520,7 +603,10 @@ def main() -> None:
 
             print(
                 "    "
+                f"policy={row.policy_name} "
                 f"tokens_per_second={row.tokens_per_second:.2f} "
+                f"avg_ttft_ms={format_optional_float(row.avg_ttft_ms)} "
+                f"avg_latency_ms={format_optional_float(row.avg_latency_ms)} "
                 f"backend_ms_median={row.backend_ms_median:.3f} "
                 f"backend_ms_p95={row.backend_ms_p95:.3f} "
                 f"kv_peak_used_blocks={row.kv_peak_used_blocks} "
@@ -540,7 +626,10 @@ def main() -> None:
 
             print(
                 "    "
+                f"policy={row.policy_name} "
                 f"tokens_per_second={row.tokens_per_second:.2f} "
+                f"avg_ttft_ms={format_optional_float(row.avg_ttft_ms)} "
+                f"avg_latency_ms={format_optional_float(row.avg_latency_ms)} "
                 f"backend_ms_median={row.backend_ms_median:.3f} "
                 f"backend_ms_p95={row.backend_ms_p95:.3f} "
                 f"kv_peak_used_blocks={row.kv_peak_used_blocks} "
