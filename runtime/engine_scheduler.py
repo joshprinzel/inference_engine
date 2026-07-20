@@ -3,14 +3,18 @@ from queue import Empty
 from threading import Lock, Thread
 from typing import Optional
 
-
-
 from .metrics_store import MetricsStore
 from .decode_engine import DecodeEngine, DecodeStepOutput
 from .kv_block_manager import KVBlockAllocationError, KVBlockManager
 from .request_queue import RequestQueue
 from .request_state import RequestState
-from .scheduling_policy import FCFSPolicy, SchedulingPolicy, DecodeBudgetPolicy
+from .scheduling_policy import FCFSPolicy, SchedulingPolicy
+from .scheduler_work_plan import (
+    build_decode_work_plan,
+    build_prefill_work_plan,
+    requests_from_work_plan,
+    summarize_work_plan,
+)
 
 
 class EngineScheduler:
@@ -34,7 +38,7 @@ class EngineScheduler:
     Those belong to DecodeEngine implementations:
         - HFDecodeEngine
         - SyntheticCudaDecodeEngine
-        - FutureCustomModelDecodeEngine
+        - Custom engines
     """
 
     def __init__(
@@ -45,6 +49,7 @@ class EngineScheduler:
         kv_block_manager: KVBlockManager,
         max_slots: int = 4,
         scheduling_policy: SchedulingPolicy | None = None,
+        max_scheduled_tokens_per_step: int | None = None,
         step_sleep_seconds: float = 0.0,
         idle_sleep_seconds: float = 0.01,
     ) -> None:
@@ -55,12 +60,15 @@ class EngineScheduler:
         self.scheduling_policy = scheduling_policy or FCFSPolicy()
 
         self.max_slots = max_slots
+        self.max_scheduled_tokens_per_step = max_scheduled_tokens_per_step
         self.step_sleep_seconds = step_sleep_seconds
         self.idle_sleep_seconds = idle_sleep_seconds
 
         self.waiting: list[RequestState] = []
         self.finished: list[RequestState] = []
-        self.slots: list[Optional[RequestState]] = [None for _ in range(max_slots)]
+        self.slots: list[Optional[RequestState]] = [
+            None for _ in range(max_slots)
+        ]
 
         self._lock = Lock()
         self._thread: Thread | None = None
@@ -86,6 +94,9 @@ class EngineScheduler:
         self.last_decode_batch_snapshot: dict | None = None
         self.last_backend_ms: float | None = None
 
+        self.last_candidate_work_plan_summary: dict | None = None
+        self.last_executed_work_plan_summary: dict | None = None
+
     # -------------------------------------------------------------------------
     # Worker lifecycle
     # -------------------------------------------------------------------------
@@ -106,7 +117,11 @@ class EngineScheduler:
     # -------------------------------------------------------------------------
 
     def occupied_slot_count(self) -> int:
-        return sum(1 for request_state in self.slots if request_state is not None)
+        return sum(
+            1
+            for request_state in self.slots
+            if request_state is not None
+        )
 
     def has_free_slot(self) -> bool:
         return self.occupied_slot_count() < self.max_slots
@@ -126,6 +141,34 @@ class EngineScheduler:
 
     def snapshot(self) -> dict:
         with self._lock:
+            active_requests = self.active_request_states()
+
+            active_prefill_tokens_remaining = sum(
+                request.prefill_tokens_remaining
+                for request in active_requests
+            )
+            active_decode_tokens_remaining = sum(
+                request.decode_tokens_remaining
+                for request in active_requests
+            )
+            active_estimated_tokens_remaining = sum(
+                request.estimated_total_tokens_remaining
+                for request in active_requests
+            )
+
+            waiting_prefill_tokens_remaining = sum(
+                request.prefill_tokens_remaining
+                for request in self.waiting
+            )
+            waiting_decode_tokens_remaining = sum(
+                request.decode_tokens_remaining
+                for request in self.waiting
+            )
+            waiting_estimated_tokens_remaining = sum(
+                request.estimated_total_tokens_remaining
+                for request in self.waiting
+            )
+
             return {
                 "engine_step": self.engine_step,
                 "scheduler_type": "engine_agnostic_continuous_slots",
@@ -135,6 +178,27 @@ class EngineScheduler:
                 "active": self.occupied_slot_count(),
                 "finished": len(self.finished),
                 "max_slots": self.max_slots,
+                "max_scheduled_tokens_per_step": (
+                    self.max_scheduled_tokens_per_step
+                ),
+                "active_prefill_tokens_remaining": (
+                    active_prefill_tokens_remaining
+                ),
+                "active_decode_tokens_remaining": (
+                    active_decode_tokens_remaining
+                ),
+                "active_estimated_tokens_remaining": (
+                    active_estimated_tokens_remaining
+                ),
+                "waiting_prefill_tokens_remaining": (
+                    waiting_prefill_tokens_remaining
+                ),
+                "waiting_decode_tokens_remaining": (
+                    waiting_decode_tokens_remaining
+                ),
+                "waiting_estimated_tokens_remaining": (
+                    waiting_estimated_tokens_remaining
+                ),
                 "kv_cache": self.kv_block_manager.snapshot(),
                 "kv_used_blocks": self.kv_block_manager.used_block_count(),
                 "kv_free_blocks": self.kv_block_manager.free_block_count(),
@@ -148,7 +212,24 @@ class EngineScheduler:
                         "prompt_tokens": request_state.prompt_tokens,
                         "generated_tokens": request_state.generated_tokens,
                         "max_new_tokens": request_state.max_new_tokens,
-                        "num_computed_tokens": request_state.num_computed_tokens,
+                        "num_computed_tokens": (
+                            request_state.num_computed_tokens
+                        ),
+                        "prefill_tokens_total": (
+                            request_state.prefill_tokens_total
+                        ),
+                        "prefill_tokens_remaining": (
+                            request_state.prefill_tokens_remaining
+                        ),
+                        "decode_tokens_total": (
+                            request_state.decode_tokens_total
+                        ),
+                        "decode_tokens_remaining": (
+                            request_state.decode_tokens_remaining
+                        ),
+                        "estimated_total_tokens_remaining": (
+                            request_state.estimated_total_tokens_remaining
+                        ),
                     }
                     for request_state in self.slots
                 ],
@@ -161,11 +242,21 @@ class EngineScheduler:
                 "decode_batches_built": self.decode_batches_built,
                 "last_decode_batch": self.last_decode_batch_snapshot,
                 "last_backend_ms": self.last_backend_ms,
+                "last_candidate_work_plan_summary": (
+                    self.last_candidate_work_plan_summary
+                ),
+                "last_executed_work_plan_summary": (
+                    self.last_executed_work_plan_summary
+                ),
                 "late_admissions": self.late_admissions,
                 "early_finishes": self.early_finishes,
                 "queue_length_history_tail": self.queue_length_history[-20:],
-                "occupied_slots_history_tail": self.occupied_slots_history[-20:],
-                "finished_count_history_tail": self.finished_count_history[-20:],
+                "occupied_slots_history_tail": (
+                    self.occupied_slots_history[-20:]
+                ),
+                "finished_count_history_tail": (
+                    self.finished_count_history[-20:]
+                ),
             }
 
     # -------------------------------------------------------------------------
@@ -181,7 +272,80 @@ class EngineScheduler:
 
             request_state.status = "waiting"
             self.waiting.append(request_state)
-    
+
+    def reserve_kv_for_request(self, request_state: RequestState) -> bool:
+        """
+        Reserve initial KV blocks for an admitted request.
+
+        This method performs scheduler-owned memory admission logic:
+            - count prompt tokens
+            - check whether prompt + decode reservation can fit
+            - allocate prompt KV blocks
+            - store prompt token count and block table on RequestState
+
+        The actual prefill computation is owned by the DecodeEngine.
+        """
+
+        prompt_tokens = self.decode_engine.count_prompt_tokens(
+            request_state.prompt
+        )
+        reserved_tokens = prompt_tokens + request_state.max_new_tokens
+
+        if not self.kv_block_manager.can_allocate_tokens(reserved_tokens):
+            return False
+
+        request_id = str(request_state.request_id)
+        block_table = self.kv_block_manager.allocate_for_tokens(
+            request_id=request_id,
+            num_tokens=prompt_tokens,
+        )
+
+        request_state.block_table = block_table
+        request_state.prompt_tokens = prompt_tokens
+        return True
+
+    def prefill_admitted_request(self, request_state: RequestState) -> None:
+        """
+        Run full prefill for an admitted request.
+
+        The scheduler decides when this work happens. The DecodeEngine owns the
+        model-specific execution and KV-cache materialization.
+
+        Today this is a full prompt prefill. Later, this boundary is where
+        chunked prefill scheduling can be introduced.
+        """
+
+        self.decode_engine.prefill_request(request_state)
+
+    def mark_request_prefill_complete(self, request_state: RequestState) -> None:
+        """
+        Mark a request as ready for decode after prefill completes.
+
+        Today full prefill completes immediately during admission. Later, chunked
+        prefill will call this only when num_computed_tokens reaches prompt_tokens.
+        """
+        if request_state.prefill_tokens_remaining != 0:
+            raise RuntimeError(
+                f"Cannot mark request_id={request_state.request_id!r}"
+                "decode-ready while prefill tokens remain: "
+                f"{request_state.prefill_tokens_remaining}"
+            )
+        
+        request_state.mark_decoding()
+
+    def place_request_in_slot(
+        self,
+        *,
+        request_state: RequestState,
+        slot_index: int,
+    ) -> None:
+        """
+        Activate an admitted and prefilled request in a scheduler slot.
+        """
+
+        self.slots[slot_index] = request_state
+        self.admitted_count += 1
+
     def remove_from_waiting(self, request_state: RequestState) -> bool:
         for index, waiting_request in enumerate(self.waiting):
             if waiting_request is request_state:
@@ -193,83 +357,86 @@ class EngineScheduler:
         while self.waiting and self.has_free_slot():
             available_slots = self.max_slots - self.occupied_slot_count()
 
-            selected_requests = self.scheduling_policy.select_admission(
+            selected_requests = self.scheduling_policy.select_admissions(
                 waiting=list(self.waiting),
                 active=self.active_request_states(),
                 available_slots=available_slots,
                 kv_block_manager=self.kv_block_manager,
-                decode_engine=self.decode_engine
+                decode_engine=self.decode_engine,
             )
 
             if not selected_requests:
                 return
-            
-            request_state = selected_requests[0]
 
-            if not self.remove_from_waiting(request_state):
-                raise RuntimeError(
-                    f"Scheduling policy selected request_id={request_state.request_id!r} that is not currently waiting"
-                )
-            
-            slot_index = self.first_free_slot_index()
-            if slot_index is None:
-                self.waiting.insert(0, request_state)
-                return
-            
-            request_state.mark_admitted()
+            admitted_any = False
 
-            try:
-                prompt_tokens = self.decode_engine.count_prompt_tokens(
-                    request_state.prompt
-                )
+            for request_state in selected_requests:
+                if not self.has_free_slot():
+                    return
 
-                reserved_tokens = prompt_tokens + request_state.max_new_tokens
-                if not self.kv_block_manager.can_allocate_tokens(reserved_tokens):
-                    request_state.status = "waiting"
+                if not self.remove_from_waiting(request_state):
+                    raise RuntimeError(
+                        "Scheduling policy selected "
+                        f"request_id={request_state.request_id!r} "
+                        "that is not currently waiting"
+                    )
+
+                slot_index = self.first_free_slot_index()
+                if slot_index is None:
                     self.waiting.insert(0, request_state)
                     return
-                
-                request_id = str(request_state.request_id)
-                block_table = self.kv_block_manager.allocate_for_tokens(request_id=request_id, num_tokens=prompt_tokens)
 
-                request_state.block_table = block_table
-                request_state.prompt_tokens = prompt_tokens
+                request_state.mark_admitted()
 
-                self.decode_engine.init_request_state(request_state)
-                request_state.num_computed_tokens = request_state.prompt_tokens
-            
-            except Exception as error:
-                self.kv_block_manager.free(str(request_state.request_id))
-                request_state.mark_failed(error)
-                self.finished.append(request_state)
-                self.metrics_store.record_finished(request_state)
-                continue
+                try:
+                    if not self.reserve_kv_for_request(request_state):
+                        request_state.status = "waiting"
+                        self.waiting.insert(0, request_state)
+                        continue
 
-            if self.occupied_slot_count() > 0:
-                self.late_admissions += 1
-            
-            self.slots[slot_index] = request_state
-            self.admitted_count += 1
+                except Exception as error:
+                    self.kv_block_manager.free(str(request_state.request_id))
+                    request_state.mark_failed(error)
+                    self.finished.append(request_state)
+                    self.metrics_store.record_finished(request_state)
+                    continue
 
+                if self.occupied_slot_count() > 0:
+                    self.late_admissions += 1
 
+                self.place_request_in_slot(
+                    request_state=request_state,
+                    slot_index=slot_index,
+                )
+                admitted_any = True
+
+            if not admitted_any:
+                return
 
     # -------------------------------------------------------------------------
     # Decode
     # -------------------------------------------------------------------------
 
-    def decode_active_requests(self) -> None:
-        active = self.active_request_states()
-        if not active:
-            return
+    def build_runnable_decode_requests(
+        self,
+        active: list[RequestState],
+    ) -> tuple[list[RequestState], list[RequestState]]:
+        """
+        Split active requests into runnable and stalled decode candidates.
 
-        self.decode_steps += 1
+        A request is runnable if the KV block manager can provide capacity for
+        the next generated token position. Stalled requests could not allocate
+        decode-time KV capacity this step.
+        """
 
         runnable: list[RequestState] = []
         stalled: list[RequestState] = []
 
         for request_state in active:
             request_id = str(request_state.request_id)
-            token_position = request_state.prompt_tokens + request_state.generated_tokens
+            token_position = (
+                request_state.prompt_tokens + request_state.generated_tokens
+            )
 
             try:
                 self.kv_block_manager.ensure_capacity_for_token(
@@ -277,7 +444,7 @@ class EngineScheduler:
                     token_position=token_position,
                 )
                 request_state.block_table = self.kv_block_manager.get_block_tables(
-                    request_id
+                    request_id=request_id
                 )
                 runnable.append(request_state)
 
@@ -286,25 +453,134 @@ class EngineScheduler:
                 self.kv_allocation_failures += 1
                 stalled.append(request_state)
 
+        return runnable, stalled
+    
+    def decode_ready_request_states(self) -> list[RequestState]:
+        """
+        Return active requests that are ready for decode.
+
+        A request is decode-ready once full prefill has completed and the request is 
+        in decoding state.
+        """
+        return [
+            request_state
+            for request_state in self.active_request_states()
+            if(
+                request_state.status == "decoding"
+                and request_state.prefill_tokens_remaining == 0
+            )
+        ]
+    
+    def prefill_active_request_states(self) -> list[RequestState]:
+        """
+        Return active requests that still need prefill work
+
+        Today this is usually empty because admitted reqeusts are fully prefetched immediately. 
+        Later, chunked prefill will keep requests in this state across scheduler steps.
+        """
+        return [
+            request_state
+            for request_state in self.active_request_states()
+            if(
+                request_state.status == "prefill"
+                and request_state.prefill_tokens_remaining > 0
+            )
+        ]
+    
+    def run_prefill_for_active_requests(self) -> None:
+        """
+        Run full prefill for active requests that are still in prefill state.
+
+        Prefill is budgeted by scheduler work items. A request remains in prefill
+        state until all prompt tokens have been computed.
+        """
+
+        prefill_requests = self.prefill_active_request_states()
+        if not prefill_requests:
+            return
+        
+        work_plan = build_prefill_work_plan(prefill_requests, max_scheduled_tokens=self.max_scheduled_tokens_per_step)
+        self.last_candidate_work_plan_summary = summarize_work_plan(work_plan)
+        
+        for work in work_plan:
+            request_state = work.request_state
+
+            try:
+                self.decode_engine.prefill_chunk(
+                    request_state=request_state,
+                    num_tokens=work.num_scheduled_tokens,
+                    kv_block_manager=self.kv_block_manager
+                )
+
+                if request_state.prefill_tokens_remaining == 0:
+                    self.mark_request_prefill_complete(request_state)
+            
+            except Exception as error:
+                self.fail_request(request_state, error)
+        
+        self.last_executed_work_plan_summary = summarize_work_plan(work_plan)
+
+    def select_decode_batch(
+        self,
+        runnable: list[RequestState],
+    ) -> list[RequestState]:
+        """
+        Select the runnable requests that should execute this decode step.
+
+        The scheduler delegates ordering/budgeting decisions to the configured
+        SchedulingPolicy.
+        """
+
+        return self.scheduling_policy.select_decode_batch(
+            active=runnable,
+            kv_block_manager=self.kv_block_manager,
+            max_batch_size=None,
+        )
+
+    def run_decode_batch(
+        self,
+        decode_batch: list[RequestState],
+    ) -> DecodeStepOutput:
+        """
+        Execute one decode batch through the DecodeEngine.
+
+        The scheduler owns batch selection. The DecodeEngine owns model
+        execution.
+        """
+
+        return self.decode_engine.decode_step(
+            request_states=decode_batch,
+            kv_block_manager=self.kv_block_manager,
+        )
+
+    def decode_active_requests(self) -> None:
+        active = self.decode_ready_request_states()
+        if not active:
+            return
+
+        self.decode_steps += 1
+
+        runnable, stalled = self.build_runnable_decode_requests(active=active)
+
         if not runnable:
             if stalled:
                 self.evict_one_stalled_request(stalled)
             return
-        
-        decode_batch = self.scheduling_policy.select_decode_batch(
-            active=runnable,
-            kv_block_manager=self.kv_block_manager,
-            max_batch_size=None
-        )
+
+        decode_batch = self.select_decode_batch(runnable)
 
         if not decode_batch:
             self.decode_stalls += 1
+            return
+
+        work_plan = build_decode_work_plan(decode_batch)
+        self.last_candidate_work_plan_summary = summarize_work_plan(work_plan)
+
+        decode_batch = requests_from_work_plan(work_plan)
+        self.last_executed_work_plan_summary = summarize_work_plan(work_plan)
 
         try:
-            output = self.decode_engine.decode_step(
-                request_states=decode_batch,
-                kv_block_manager=self.kv_block_manager,
-            )
+            output = self.run_decode_batch(decode_batch)
             self.apply_decode_output(output)
 
         except Exception as error:
@@ -361,7 +637,11 @@ class EngineScheduler:
 
         self.early_finishes += 1
 
-    def fail_request(self, request_state: RequestState, error: Exception) -> None:
+    def fail_request(
+        self,
+        request_state: RequestState,
+        error: Exception,
+    ) -> None:
         self.kv_block_manager.free(str(request_state.request_id))
         request_state.mark_failed(error)
 
@@ -373,7 +653,10 @@ class EngineScheduler:
                 self.slots[index] = None
                 break
 
-    def evict_one_stalled_request(self, stalled: list[RequestState]) -> None:
+    def evict_one_stalled_request(
+        self,
+        stalled: list[RequestState],
+    ) -> None:
         victim = stalled[-1]
 
         self.kv_block_manager.free(str(victim.request_id))
@@ -407,6 +690,7 @@ class EngineScheduler:
         with self._lock:
             self.drain_external_queue()
             self.admit_waiting_requests()
+            self.run_prefill_for_active_requests()
             self.decode_active_requests()
             self.record_history()
             self.engine_step += 1

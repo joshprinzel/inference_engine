@@ -78,12 +78,49 @@ class RequestState:
     def generated_text(self) -> str:
         return "".join(self.generated_text_parts)
     
-    @staticmethod
-    def _seconds_to_ms(value: float | None) -> float | None:
-        if value is None:
-            return None
-        return value * 1000.0
+    @property
+    def prefill_tokens_total(self) -> int:
+        """
+        Total prompt tokens that must be represented in KV before decode
+
+        This currently mirrors prompt tokens. Later, chunked prefill can update
+        num_computed_tokens incrementally against this token.
+        """
+        return int(self.prompt_tokens)
     
+    @property
+    def prefill_tokens_remaining(self) -> int:
+        """
+        Prompt tokens that still need prefill computation
+        """
+        return max(0, self.prefill_tokens_total - int(self.num_computed_tokens))
+    
+    @property
+    def decode_tokens_total(self) -> int:
+        """
+        Maximum decode tokens requested by the user
+        """
+        return int(self.max_new_tokens)
+    
+    @property
+    def decode_tokens_remaining(self) -> int:
+        """
+        Decode tokens remaining before the request reaches its generation limit
+        """
+        return max(0, self.decode_tokens_total - int(self.generated_tokens))
+    
+    @property
+    def estimated_total_tokens_remaining(self) -> int:
+        """
+        Simple scheduler-facing estimate of remaining request work
+
+        This is intentionally token-based rather then time-based. Future policies 
+        may weight prefill and decode tokens differently once benchmark data
+        distinguishes their costs
+        """
+        return self.prefill_tokens_remaining + self.decode_tokens_remaining
+    
+
     @property
     def queue_wait_seconds(self) -> float | None:
         if self.admit_time is None:

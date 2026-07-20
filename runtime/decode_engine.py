@@ -30,18 +30,17 @@ class DecodeEngine(Protocol):
         - request admission
         - active slots
         - queueing
+        - K/V block reservation/free policy
         - finish/free policy
         - metrics
 
     The DecodeEngine owns:
-        - prompt/token initialization
+        - tokenization and prompt length estimation
+        - request-local model state initialization
+        - prefill execution
         - one decode step of execution
         - backend-specific model/KV behavior
     
-    Implementations:
-        - HFDecodeEngine
-        - SyntheticCudaDecodeEngine
-        - FutureCustomModelDecodeEngine
     """
 
     @property
@@ -52,6 +51,27 @@ class DecodeEngine(Protocol):
         ...
     
     def init_request_state(self, request_state: RequestState) -> None:
+        ...
+
+    def prefill_request(self, request_state: RequestState) -> None:
+        """
+        Run full prefill for one admitted request
+
+        Current implementation may perform tokenization, prompt forward pass,
+        KV-cache materialization, and first next-token selection in this method
+
+        Later, chunked prefill can replace this full-prefill operation with
+        incremental prefill progress while preserving the scheduler/engine
+        ownership boundary
+        """
+        ...
+
+    def prefill_chunk(
+            self,
+            request_state: RequestState,
+            num_tokens: int,
+            kv_block_manager,
+    ) -> None:
         ...
     
     def decode_step(

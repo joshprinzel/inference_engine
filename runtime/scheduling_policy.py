@@ -37,7 +37,7 @@ class SchedulingPolicy(Protocol):
 class FCFSPolicy:
     name: str = "fcfs"
 
-    def select_admission(
+    def select_admissions(
             self,
             *,
             waiting: list[RequestState],
@@ -74,7 +74,7 @@ class DecodeBudgetPolicy:
     def name(self) -> str:
         return f"decode_budget_{self.max_decode_batch_size}"
 
-    def select_admission(
+    def select_admissions(
         self,
         *,
         waiting: list[RequestState],
